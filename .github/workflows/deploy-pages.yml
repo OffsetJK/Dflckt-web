@@ -1,0 +1,59 @@
+name: Deploy DFLCKT Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build static site
+        env:
+          MAPBOX_PUBLIC_TOKEN: ${{ secrets.MAPBOX_PUBLIC_TOKEN }}
+        run: |
+          test -n "$MAPBOX_PUBLIC_TOKEN"
+          mkdir -p _site
+          find . -maxdepth 1 -type f -exec cp {} _site/ \;
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          p = Path('_site/route.js')
+          text = p.read_text()
+          token = os.environ['MAPBOX_PUBLIC_TOKEN']
+          if '__MAPBOX_PUBLIC_TOKEN__' not in text:
+              raise SystemExit('Mapbox token placeholder not found')
+          p.write_text(text.replace('__MAPBOX_PUBLIC_TOKEN__', token))
+          PY
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
