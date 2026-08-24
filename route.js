@@ -1,4 +1,4 @@
-const MAPBOX_TOKEN = 'pk.eyJ1IjoizGZsY2t0MSIsImEiOiJjbXQ3bjFmbXUwMnM5MnhvbGV6bW1iOGtkIn0.heLVAWAqfKVjWhie8hqjEA';
+const MAPBOX_TOKEN = '__MAPBOX_PUBLIC_TOKEN__';
 
 const routeForm = document.querySelector('[data-route-form]');
 const routeMessage = document.querySelector('[data-route-message]');
