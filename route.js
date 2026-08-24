@@ -21,14 +21,26 @@ function minutes(seconds) {
   return Math.max(1, Math.round(seconds / 60));
 }
 
+async function apiError(response, fallback) {
+  let detail = '';
+  try {
+    const body = await response.json();
+    detail = body.message || body.error || '';
+  } catch (_) {
+    try { detail = await response.text(); } catch (_) {}
+  }
+  return new Error(`${fallback} (${response.status})${detail ? `: ${detail}` : ''}`);
+}
+
 async function geocode(query) {
   const url = new URL('https://api.mapbox.com/search/geocode/v6/forward');
   url.searchParams.set('q', query);
   url.searchParams.set('limit', '1');
+  url.searchParams.set('country', 'US');
   url.searchParams.set('access_token', MAPBOX_TOKEN);
 
   const response = await fetch(url);
-  if (!response.ok) throw new Error('Geocoding request failed');
+  if (!response.ok) throw await apiError(response, 'Geocoding request failed');
   const data = await response.json();
   if (!data.features || !data.features.length) throw new Error(`Could not find “${query}”`);
 
@@ -49,7 +61,7 @@ async function getRoutes(origin, destination) {
   url.searchParams.set('access_token', MAPBOX_TOKEN);
 
   const response = await fetch(url);
-  if (!response.ok) throw new Error('Routing request failed');
+  if (!response.ok) throw await apiError(response, 'Routing request failed');
   const data = await response.json();
   if (!data.routes || !data.routes.length) throw new Error('No driving route was found between those locations');
   return data.routes;
