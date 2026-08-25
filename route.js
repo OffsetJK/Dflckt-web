@@ -93,7 +93,6 @@ function ensureMap(center) {
 function ensureAlprSource() {
   if (!map || map.getSource(ALPR_SOURCE_ID)) return;
   map.addSource(ALPR_SOURCE_ID, { type: 'vector', url: ALPR_TILEJSON });
-  // Keep the raw source invisible; it exists only for route scoring.
   map.addLayer({
     id: ALPR_LAYER_ID,
     type: 'circle',
@@ -240,8 +239,6 @@ function exposureCount(route, points) {
 }
 
 function generalizedCenter(coord) {
-  // Round the public-facing center to roughly a neighborhood-block scale.
-  // Raw coordinates remain internal to the scoring calculation.
   return [
     Math.round(coord[0] * 1000) / 1000,
     Math.round(coord[1] * 1000) / 1000
@@ -319,9 +316,10 @@ function renderRouteCards(routes, exposureCounts = null) {
     card.className = `route-result ${index === 0 ? 'fastest' : ''}`;
     const deltaMinutes = Math.max(0, displayMinutes - fastestDisplayMinutes);
     const delta = index === 0 ? '' : `+${deltaMinutes} min vs fastest`;
+    const label = index === 0 ? 'Fastest' : `Alternate route ${index}`;
     card.innerHTML = `
       <div>
-        <span class="route-result-label">${index === 0 ? 'Fastest' : `Candidate ${index + 1}`}</span>
+        <span class="route-result-label">${label}</span>
         <strong>${displayMinutes} min</strong>
       </div>
       <div class="route-result-meta">
