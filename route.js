@@ -334,7 +334,6 @@ function closestRouteSegment(route, point) {
 
 function offsetPerpendicular(center, a, b, meters, side) {
   const lat0 = center[1];
-  const c = toXY(center, lat0);
   const p1 = toXY(a, lat0);
   const p2 = toXY(b, lat0);
   const dx = p2[0] - p1[0];
@@ -361,27 +360,25 @@ function detourWaypoints(fastestRoute, cameraPoints) {
   return waypoints;
 }
 
-async function buildLowerExposureRoute(fastestRoute, cameraPoints, allPoints) {
-  if (!lastOrigin || !lastDestination || !cameraPoints.length) return null;
+async function buildGeneratedDetours(fastestRoute, cameraPoints, allPoints) {
+  if (!lastOrigin || !lastDestination || !cameraPoints.length) return [];
   const waypoints = detourWaypoints(fastestRoute, cameraPoints);
   const results = await Promise.allSettled(
     waypoints.map(waypoint => getRouteViaWaypoint(lastOrigin, lastDestination, waypoint))
   );
 
-  const candidates = results
+  return results
     .filter(result => result.status === 'fulfilled')
     .map(result => result.value)
     .filter(route => route.duration <= fastestRoute.duration * PRIVACY_ROUTE_MAX_FACTOR)
-    .map(route => ({ route, count: exposureCount(route, allPoints) }));
+    .map(route => ({ route, count: exposureCount(route, allPoints), generated: true }));
+}
 
-  if (!candidates.length) return null;
-  candidates.sort((a, b) => a.count - b.count || a.route.duration - b.route.duration);
-  const best = candidates[0];
-  const fastestCount = exposureCount(fastestRoute, allPoints);
-  if (best.count >= fastestCount) return null;
-  best.route._dflcktKind = 'privacy';
-  best.route._dflcktExposureCount = best.count;
-  return best.route;
+function chooseBestExposureCandidate(candidates, fastestRoute) {
+  const eligible = candidates.filter(candidate => candidate.route.duration <= fastestRoute.duration * PRIVACY_ROUTE_MAX_FACTOR);
+  if (!eligible.length) return null;
+  eligible.sort((a, b) => a.count - b.count || a.route.duration - b.route.duration);
+  return eligible[0];
 }
 
 async function scoreVisibleRoutes(routes) {
@@ -394,42 +391,71 @@ async function scoreVisibleRoutes(routes) {
 
     const sorted = [...routes].sort((a, b) => a.duration - b.duration);
     const fastestRoute = sorted[0];
-    const initialCounts = routes.map(route => exposureCount(route, points));
-    renderRouteCards(routes, initialCounts);
+    const fastestCount = exposureCount(fastestRoute, points);
+    const conventionalCandidates = sorted.map(route => ({ route, count: exposureCount(route, points), generated: false }));
+
+    renderRouteCards(sorted, conventionalCandidates.map(candidate => candidate.count));
     showApproximateAlprAreas(pointsNearAnyActiveRoute(points));
 
     const fastestCameraPoints = points.filter(point => pointToRouteDistanceMeters(point, fastestRoute.geometry.coordinates) <= ROUTE_MATCH_METERS);
-    if (!fastestCameraPoints.length) {
-      setMessage('Fastest route has no known ALPR locations in the currently loaded dataset.', 'success');
+    setMessage('Routes scored. Searching for the lowest known-exposure option within the 2× travel-time limit…', 'success');
+
+    const generatedCandidates = fastestCameraPoints.length
+      ? await buildGeneratedDetours(fastestRoute, fastestCameraPoints, points)
+      : [];
+
+    const allCandidates = [...conventionalCandidates, ...generatedCandidates];
+    const best = chooseBestExposureCandidate(allCandidates, fastestRoute);
+
+    routes.forEach(route => { delete route._dflcktKind; delete route._dflcktExposureCount; });
+    generatedCandidates.forEach(candidate => { delete candidate.route._dflcktKind; delete candidate.route._dflcktExposureCount; });
+
+    if (!best || best.count >= fastestCount) {
+      activeRoutes = sorted.slice(0, 3);
+      drawRouteSet(activeRoutes, lastOrigin, lastDestination);
+      renderRouteCards(activeRoutes, activeRoutes.map(route => exposureCount(route, points)));
+      showApproximateAlprAreas(pointsNearAnyActiveRoute(points));
+      setMessage(`Routes scored. Fastest is already tied for the lowest known exposure on this trip: ${fastestCount} known ALPR location${fastestCount === 1 ? '' : 's'}.`, 'success');
       return;
     }
 
-    setMessage('Routes scored. Searching for a lower-exposure route within the 2× travel-time limit…', 'success');
-    const privacyRoute = await buildLowerExposureRoute(fastestRoute, fastestCameraPoints, points);
+    best.route._dflcktKind = 'privacy';
+    best.route._dflcktExposureCount = best.count;
 
-    if (!privacyRoute) {
-      const best = Math.min(...initialCounts);
-      setMessage(`Routes scored. No lower-exposure detour was found in this proof-of-concept search. Lowest current route: ${best} known ALPR location${best === 1 ? '' : 's'}.`, 'success');
-      return;
-    }
+    const remaining = allCandidates
+      .filter(candidate => candidate.route !== fastestRoute && candidate.route !== best.route)
+      .sort((a, b) => a.route.duration - b.route.duration);
+    const alternate = remaining[0]?.route || null;
 
-    const conventionalAlternates = sorted.filter(route => route !== fastestRoute).slice(0, 1);
-    activeRoutes = [fastestRoute, ...conventionalAlternates, privacyRoute];
-    const counts = activeRoutes.map(route => route._dflcktExposureCount ?? exposureCount(route, points));
+    activeRoutes = [fastestRoute];
+    if (alternate) activeRoutes.push(alternate);
+    activeRoutes.push(best.route);
+
     drawRouteSet(activeRoutes, lastOrigin, lastDestination);
+    const counts = activeRoutes.map(route => route._dflcktExposureCount ?? exposureCount(route, points));
     renderRouteCards(activeRoutes, counts);
+    showApproximateAlprAreas(pointsNearAnyActiveRoute(points));
 
     map.once('idle', () => {
       const refreshedPoints = loadedAlprPoints();
-      if (refreshedPoints.length) {
-        const refreshedCounts = activeRoutes.map(route => exposureCount(route, refreshedPoints));
-        privacyRoute._dflcktExposureCount = refreshedCounts[activeRoutes.indexOf(privacyRoute)];
-        renderRouteCards(activeRoutes, refreshedCounts);
-        showApproximateAlprAreas(pointsNearAnyActiveRoute(refreshedPoints));
-        const privacyCount = refreshedCounts[activeRoutes.indexOf(privacyRoute)];
-        const fastestCount = refreshedCounts[0];
-        setMessage(`Lower-exposure route found: ${privacyCount} known ALPR location${privacyCount === 1 ? '' : 's'} vs ${fastestCount} on fastest.`, 'success');
+      if (!refreshedPoints.length) return;
+
+      const refreshedCounts = activeRoutes.map(route => exposureCount(route, refreshedPoints));
+      const refreshedFastestCount = refreshedCounts[0];
+      const privacyIndex = activeRoutes.indexOf(best.route);
+      const refreshedPrivacyCount = refreshedCounts[privacyIndex];
+
+      if (refreshedPrivacyCount >= refreshedFastestCount) {
+        delete best.route._dflcktKind;
+        best.route._dflcktExposureCount = refreshedPrivacyCount;
+      } else {
+        best.route._dflcktKind = 'privacy';
+        best.route._dflcktExposureCount = refreshedPrivacyCount;
       }
+
+      renderRouteCards(activeRoutes, refreshedCounts);
+      showApproximateAlprAreas(pointsNearAnyActiveRoute(refreshedPoints));
+      setMessage(`Lowest known-exposure route: ${refreshedPrivacyCount} known ALPR location${refreshedPrivacyCount === 1 ? '' : 's'} vs ${refreshedFastestCount} on fastest.`, 'success');
     });
   } catch (error) {
     console.warn('ALPR scoring/search proof failed:', error);
