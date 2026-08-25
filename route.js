@@ -3,7 +3,11 @@ const ALPR_TILEJSON = 'https://tiles.dontgetflocked.com/cameras-us-hourly.json';
 const ALPR_SOURCE_ID = 'deflock-alpr';
 const ALPR_LAYER_ID = 'deflock-alpr-loader';
 const ALPR_SOURCE_LAYER = 'cameras';
+const ALPR_DISPLAY_SOURCE_ID = 'dflckt-alpr-areas';
+const ALPR_DISPLAY_FILL_ID = 'dflckt-alpr-areas-fill';
+const ALPR_DISPLAY_STROKE_ID = 'dflckt-alpr-areas-stroke';
 const ROUTE_MATCH_METERS = 75;
+const DISPLAY_RADIUS_METERS = 110;
 
 const routeForm = document.querySelector('[data-route-form]');
 const routeMessage = document.querySelector('[data-route-message]');
@@ -89,7 +93,7 @@ function ensureMap(center) {
 function ensureAlprSource() {
   if (!map || map.getSource(ALPR_SOURCE_ID)) return;
   map.addSource(ALPR_SOURCE_ID, { type: 'vector', url: ALPR_TILEJSON });
-  // Keep the source loaded for route scoring without publishing precise camera pins.
+  // Keep the raw source invisible; it exists only for route scoring.
   map.addLayer({
     id: ALPR_LAYER_ID,
     type: 'circle',
@@ -103,12 +107,48 @@ function ensureAlprSource() {
   });
 }
 
+function ensureApproximateAlprDisplay() {
+  if (!map) return;
+  if (!map.getSource(ALPR_DISPLAY_SOURCE_ID)) {
+    map.addSource(ALPR_DISPLAY_SOURCE_ID, {
+      type: 'geojson',
+      data: { type: 'FeatureCollection', features: [] }
+    });
+  }
+  if (!map.getLayer(ALPR_DISPLAY_FILL_ID)) {
+    map.addLayer({
+      id: ALPR_DISPLAY_FILL_ID,
+      type: 'fill',
+      source: ALPR_DISPLAY_SOURCE_ID,
+      paint: {
+        'fill-color': '#f0c24b',
+        'fill-opacity': 0.18
+      }
+    });
+  }
+  if (!map.getLayer(ALPR_DISPLAY_STROKE_ID)) {
+    map.addLayer({
+      id: ALPR_DISPLAY_STROKE_ID,
+      type: 'line',
+      source: ALPR_DISPLAY_SOURCE_ID,
+      paint: {
+        'line-color': '#f0c24b',
+        'line-opacity': 0.72,
+        'line-width': 1.5
+      }
+    });
+  }
+}
+
 function clearMapRoutes() {
   if (!map) return;
   ['route-fastest', 'route-alt-1', 'route-alt-2'].forEach(id => {
     if (map.getLayer(id)) map.removeLayer(id);
     if (map.getSource(id)) map.removeSource(id);
   });
+  if (map.getSource(ALPR_DISPLAY_SOURCE_ID)) {
+    map.getSource(ALPR_DISPLAY_SOURCE_ID).setData({ type: 'FeatureCollection', features: [] });
+  }
   markers.forEach(marker => marker.remove());
   markers = [];
 }
@@ -131,6 +171,7 @@ function drawRoutes(routes, origin, destination) {
   const render = () => {
     clearMapRoutes();
     ensureAlprSource();
+    ensureApproximateAlprDisplay();
     const colors = ['#37a7ff', '#667481', '#414b56'];
     const ids = ['route-fastest', 'route-alt-1', 'route-alt-2'];
 
@@ -198,6 +239,55 @@ function exposureCount(route, points) {
   return points.reduce((count, point) => count + (pointToRouteDistanceMeters(point, route.geometry.coordinates) <= ROUTE_MATCH_METERS ? 1 : 0), 0);
 }
 
+function generalizedCenter(coord) {
+  // Round the public-facing center to roughly a neighborhood-block scale.
+  // Raw coordinates remain internal to the scoring calculation.
+  return [
+    Math.round(coord[0] * 1000) / 1000,
+    Math.round(coord[1] * 1000) / 1000
+  ];
+}
+
+function circlePolygon(center, radiusMeters, steps = 28) {
+  const [lng, lat] = center;
+  const latRadians = lat * Math.PI / 180;
+  const metersPerDegreeLat = 110540;
+  const metersPerDegreeLng = Math.max(1, 111320 * Math.cos(latRadians));
+  const coordinates = [];
+  for (let i = 0; i <= steps; i += 1) {
+    const theta = (i / steps) * Math.PI * 2;
+    coordinates.push([
+      lng + (Math.cos(theta) * radiusMeters) / metersPerDegreeLng,
+      lat + (Math.sin(theta) * radiusMeters) / metersPerDegreeLat
+    ]);
+  }
+  return { type: 'Polygon', coordinates: [coordinates] };
+}
+
+function pointsNearAnyActiveRoute(points) {
+  return points.filter(point => activeRoutes.some(route => pointToRouteDistanceMeters(point, route.geometry.coordinates) <= ROUTE_MATCH_METERS));
+}
+
+function showApproximateAlprAreas(points) {
+  if (!map?.getSource(ALPR_DISPLAY_SOURCE_ID)) return;
+  const seen = new Set();
+  const features = [];
+
+  points.forEach(point => {
+    const center = generalizedCenter(point);
+    const key = `${center[0].toFixed(3)},${center[1].toFixed(3)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    features.push({
+      type: 'Feature',
+      properties: { type: 'ALPR', confidence: 'source-only' },
+      geometry: circlePolygon(center, DISPLAY_RADIUS_METERS)
+    });
+  });
+
+  map.getSource(ALPR_DISPLAY_SOURCE_ID).setData({ type: 'FeatureCollection', features });
+}
+
 function scoreVisibleRoutes(routes) {
   try {
     const points = loadedAlprPoints();
@@ -207,6 +297,7 @@ function scoreVisibleRoutes(routes) {
     }
     const counts = routes.map(route => exposureCount(route, points));
     renderRouteCards(routes, counts);
+    showApproximateAlprAreas(pointsNearAnyActiveRoute(points));
     const best = Math.min(...counts);
     setMessage(`Routes scored against the current known-ALPR dataset. Lowest candidate on this trip: ${best} known ALPR location${best === 1 ? '' : 's'}.`, 'success');
   } catch (error) {
