@@ -1,4 +1,9 @@
 const MAPBOX_TOKEN = '__MAPBOX_PUBLIC_TOKEN__';
+const ALPR_TILEJSON = 'https://tiles.dontgetflocked.com/cameras-us-hourly.json';
+const ALPR_SOURCE_ID = 'deflock-alpr';
+const ALPR_LAYER_ID = 'deflock-alpr-loader';
+const ALPR_SOURCE_LAYER = 'cameras';
+const ROUTE_MATCH_METERS = 75;
 
 const routeForm = document.querySelector('[data-route-form]');
 const routeMessage = document.querySelector('[data-route-message]');
@@ -7,6 +12,7 @@ const routeButton = document.querySelector('[data-route-submit]');
 
 let map;
 let markers = [];
+let activeRoutes = [];
 
 function setMessage(text, type = '') {
   routeMessage.textContent = text;
@@ -80,6 +86,23 @@ function ensureMap(center) {
   map.addControl(new mapboxgl.NavigationControl({ showCompass: false }), 'top-right');
 }
 
+function ensureAlprSource() {
+  if (!map || map.getSource(ALPR_SOURCE_ID)) return;
+  map.addSource(ALPR_SOURCE_ID, { type: 'vector', url: ALPR_TILEJSON });
+  // Keep the source loaded for route scoring without publishing precise camera pins.
+  map.addLayer({
+    id: ALPR_LAYER_ID,
+    type: 'circle',
+    source: ALPR_SOURCE_ID,
+    'source-layer': ALPR_SOURCE_LAYER,
+    paint: {
+      'circle-radius': 1,
+      'circle-opacity': 0,
+      'circle-stroke-opacity': 0
+    }
+  });
+}
+
 function clearMapRoutes() {
   if (!map) return;
   ['route-fastest', 'route-alt-1', 'route-alt-2'].forEach(id => {
@@ -103,33 +126,102 @@ function addRouteLayer(id, geometry, color, width, opacity) {
 
 function drawRoutes(routes, origin, destination) {
   ensureMap(origin.coordinates);
+  activeRoutes = routes.slice(0, 3);
 
   const render = () => {
     clearMapRoutes();
+    ensureAlprSource();
     const colors = ['#37a7ff', '#667481', '#414b56'];
     const ids = ['route-fastest', 'route-alt-1', 'route-alt-2'];
 
-    routes.slice(0, 3).forEach((route, index) => {
+    activeRoutes.forEach((route, index) => {
       addRouteLayer(ids[index], route.geometry, colors[index], index === 0 ? 6 : 4, index === 0 ? 0.95 : 0.8);
     });
 
     markers.push(new mapboxgl.Marker({ color: '#37a7ff' }).setLngLat(origin.coordinates).addTo(map));
     markers.push(new mapboxgl.Marker({ color: '#f3f6f8' }).setLngLat(destination.coordinates).addTo(map));
 
-    const coordinates = routes.flatMap(route => route.geometry.coordinates);
+    const coordinates = activeRoutes.flatMap(route => route.geometry.coordinates);
     const bounds = coordinates.reduce((b, coord) => b.extend(coord), new mapboxgl.LngLatBounds(coordinates[0], coordinates[0]));
     map.fitBounds(bounds, { padding: 55, duration: 700 });
+
+    map.once('idle', () => scoreVisibleRoutes(activeRoutes));
   };
 
   if (map.loaded()) render();
   else map.once('load', render);
 }
 
-function renderRouteCards(routes) {
+function toXY(coord, lat0) {
+  const rad = Math.PI / 180;
+  return [coord[0] * 111320 * Math.cos(lat0 * rad), coord[1] * 110540];
+}
+
+function pointSegmentDistanceMeters(point, a, b) {
+  const lat0 = point[1];
+  const p = toXY(point, lat0);
+  const p1 = toXY(a, lat0);
+  const p2 = toXY(b, lat0);
+  const dx = p2[0] - p1[0];
+  const dy = p2[1] - p1[1];
+  if (dx === 0 && dy === 0) return Math.hypot(p[0] - p1[0], p[1] - p1[1]);
+  const t = Math.max(0, Math.min(1, ((p[0] - p1[0]) * dx + (p[1] - p1[1]) * dy) / (dx * dx + dy * dy)));
+  return Math.hypot(p[0] - (p1[0] + t * dx), p[1] - (p1[1] + t * dy));
+}
+
+function pointToRouteDistanceMeters(point, coordinates) {
+  let best = Infinity;
+  for (let i = 1; i < coordinates.length; i += 1) {
+    best = Math.min(best, pointSegmentDistanceMeters(point, coordinates[i - 1], coordinates[i]));
+    if (best <= ROUTE_MATCH_METERS) break;
+  }
+  return best;
+}
+
+function loadedAlprPoints() {
+  if (!map?.getSource(ALPR_SOURCE_ID)) return [];
+  const features = map.querySourceFeatures(ALPR_SOURCE_ID, { sourceLayer: ALPR_SOURCE_LAYER });
+  const seen = new Set();
+  const points = [];
+  features.forEach(feature => {
+    if (feature.geometry?.type !== 'Point') return;
+    const coord = feature.geometry.coordinates;
+    const key = `${coord[0].toFixed(6)},${coord[1].toFixed(6)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    points.push(coord);
+  });
+  return points;
+}
+
+function exposureCount(route, points) {
+  return points.reduce((count, point) => count + (pointToRouteDistanceMeters(point, route.geometry.coordinates) <= ROUTE_MATCH_METERS ? 1 : 0), 0);
+}
+
+function scoreVisibleRoutes(routes) {
+  try {
+    const points = loadedAlprPoints();
+    if (!points.length) {
+      setMessage('Routes found. Known-ALPR data is still loading; route exposure could not be scored on this pass.', 'success');
+      return;
+    }
+    const counts = routes.map(route => exposureCount(route, points));
+    renderRouteCards(routes, counts);
+    const best = Math.min(...counts);
+    setMessage(`Routes scored against the current known-ALPR dataset. Lowest candidate on this trip: ${best} known ALPR location${best === 1 ? '' : 's'}.`, 'success');
+  } catch (error) {
+    console.warn('ALPR scoring proof failed:', error);
+    setMessage('Routes found. ALPR exposure scoring is temporarily unavailable.', 'success');
+  }
+}
+
+function renderRouteCards(routes, exposureCounts = null) {
   const sorted = [...routes].sort((a, b) => a.duration - b.duration);
   routeResults.innerHTML = '';
 
   sorted.slice(0, 3).forEach((route, index) => {
+    const originalIndex = routes.indexOf(route);
+    const count = exposureCounts ? exposureCounts[originalIndex] : null;
     const card = document.createElement('article');
     card.className = `route-result ${index === 0 ? 'fastest' : ''}`;
     const delta = index === 0 ? '' : `+${Math.max(0, minutes(route.duration - sorted[0].duration))} min vs fastest`;
@@ -141,6 +233,7 @@ function renderRouteCards(routes) {
       <div class="route-result-meta">
         <span>${miles(route.distance)} mi</span>
         ${delta ? `<span>${delta}</span>` : '<span>Baseline</span>'}
+        <span>${count === null ? 'Checking known ALPR exposure…' : `${count} known ALPR location${count === 1 ? '' : 's'}`}</span>
       </div>`;
     routeResults.appendChild(card);
   });
@@ -167,7 +260,7 @@ routeForm?.addEventListener('submit', async event => {
     const routes = await getRoutes(origin, destination);
     renderRouteCards(routes);
     drawRoutes(routes, origin, destination);
-    setMessage(`Showing candidate routes from ${origin.label} to ${destination.label}. Surveillance scoring is not applied yet.`, 'success');
+    setMessage(`Showing candidate routes from ${origin.label} to ${destination.label}. Loading known-ALPR exposure…`, 'success');
   } catch (error) {
     console.error(error);
     setMessage(error.message || 'We could not calculate that route. Try a more specific address or city.', 'error');
