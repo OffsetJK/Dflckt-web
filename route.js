@@ -8,6 +8,8 @@ const ALPR_DISPLAY_FILL_ID = 'dflckt-alpr-areas-fill';
 const ALPR_DISPLAY_STROKE_ID = 'dflckt-alpr-areas-stroke';
 const ROUTE_MATCH_METERS = 75;
 const DISPLAY_RADIUS_METERS = 110;
+const PRIVACY_ROUTE_MAX_FACTOR = 2;
+const DETOUR_OFFSETS_METERS = [900, 1500, 2200];
 
 const routeForm = document.querySelector('[data-route-form]');
 const routeMessage = document.querySelector('[data-route-message]');
@@ -17,6 +19,8 @@ const routeButton = document.querySelector('[data-route-submit]');
 let map;
 let markers = [];
 let activeRoutes = [];
+let lastOrigin = null;
+let lastDestination = null;
 
 function setMessage(text, type = '') {
   routeMessage.textContent = text;
@@ -75,6 +79,22 @@ async function getRoutes(origin, destination) {
   const data = await response.json();
   if (!data.routes || !data.routes.length) throw new Error('No driving route was found between those locations');
   return data.routes;
+}
+
+async function getRouteViaWaypoint(origin, destination, waypoint) {
+  const coords = `${origin.coordinates[0]},${origin.coordinates[1]};${waypoint[0]},${waypoint[1]};${destination.coordinates[0]},${destination.coordinates[1]}`;
+  const url = new URL(`https://api.mapbox.com/directions/v5/mapbox/driving/${coords}`);
+  url.searchParams.set('alternatives', 'false');
+  url.searchParams.set('geometries', 'geojson');
+  url.searchParams.set('overview', 'full');
+  url.searchParams.set('steps', 'false');
+  url.searchParams.set('access_token', MAPBOX_TOKEN);
+
+  const response = await fetch(url);
+  if (!response.ok) throw await apiError(response, 'Lower-exposure route request failed');
+  const data = await response.json();
+  if (!data.routes || !data.routes.length) throw new Error('No detour route found');
+  return data.routes[0];
 }
 
 function ensureMap(center) {
@@ -141,7 +161,7 @@ function ensureApproximateAlprDisplay() {
 
 function clearMapRoutes() {
   if (!map) return;
-  ['route-fastest', 'route-alt-1', 'route-alt-2'].forEach(id => {
+  ['route-fastest', 'route-alt-1', 'route-alt-2', 'route-privacy'].forEach(id => {
     if (map.getLayer(id)) map.removeLayer(id);
     if (map.getSource(id)) map.removeSource(id);
   });
@@ -163,28 +183,40 @@ function addRouteLayer(id, geometry, color, width, opacity) {
   });
 }
 
+function drawRouteSet(routes, origin, destination) {
+  clearMapRoutes();
+  ensureAlprSource();
+  ensureApproximateAlprDisplay();
+
+  const conventional = routes.filter(route => route._dflcktKind !== 'privacy');
+  const privacy = routes.find(route => route._dflcktKind === 'privacy');
+
+  conventional.slice(0, 3).forEach((route, index) => {
+    const id = index === 0 ? 'route-fastest' : `route-alt-${index}`;
+    const color = index === 0 ? '#37a7ff' : '#d85b5b';
+    addRouteLayer(id, route.geometry, color, index === 0 ? 6 : 4, index === 0 ? 0.95 : 0.78);
+  });
+
+  if (privacy) {
+    addRouteLayer('route-privacy', privacy.geometry, '#4bd16f', 6, 0.95);
+  }
+
+  markers.push(new mapboxgl.Marker({ color: '#37a7ff' }).setLngLat(origin.coordinates).addTo(map));
+  markers.push(new mapboxgl.Marker({ color: '#f3f6f8' }).setLngLat(destination.coordinates).addTo(map));
+
+  const coordinates = routes.flatMap(route => route.geometry.coordinates);
+  const bounds = coordinates.reduce((b, coord) => b.extend(coord), new mapboxgl.LngLatBounds(coordinates[0], coordinates[0]));
+  map.fitBounds(bounds, { padding: 55, duration: 700 });
+}
+
 function drawRoutes(routes, origin, destination) {
   ensureMap(origin.coordinates);
+  lastOrigin = origin;
+  lastDestination = destination;
   activeRoutes = routes.slice(0, 3);
 
   const render = () => {
-    clearMapRoutes();
-    ensureAlprSource();
-    ensureApproximateAlprDisplay();
-    const colors = ['#37a7ff', '#667481', '#414b56'];
-    const ids = ['route-fastest', 'route-alt-1', 'route-alt-2'];
-
-    activeRoutes.forEach((route, index) => {
-      addRouteLayer(ids[index], route.geometry, colors[index], index === 0 ? 6 : 4, index === 0 ? 0.95 : 0.8);
-    });
-
-    markers.push(new mapboxgl.Marker({ color: '#37a7ff' }).setLngLat(origin.coordinates).addTo(map));
-    markers.push(new mapboxgl.Marker({ color: '#f3f6f8' }).setLngLat(destination.coordinates).addTo(map));
-
-    const coordinates = activeRoutes.flatMap(route => route.geometry.coordinates);
-    const bounds = coordinates.reduce((b, coord) => b.extend(coord), new mapboxgl.LngLatBounds(coordinates[0], coordinates[0]));
-    map.fitBounds(bounds, { padding: 55, duration: 700 });
-
+    drawRouteSet(activeRoutes, origin, destination);
     map.once('idle', () => scoreVisibleRoutes(activeRoutes));
   };
 
@@ -285,38 +317,141 @@ function showApproximateAlprAreas(points) {
   map.getSource(ALPR_DISPLAY_SOURCE_ID).setData({ type: 'FeatureCollection', features });
 }
 
-function scoreVisibleRoutes(routes) {
+function cameraCentroid(points) {
+  const total = points.reduce((sum, point) => [sum[0] + point[0], sum[1] + point[1]], [0, 0]);
+  return [total[0] / points.length, total[1] / points.length];
+}
+
+function closestRouteSegment(route, point) {
+  const coords = route.geometry.coordinates;
+  let best = { a: coords[0], b: coords[1], distance: Infinity };
+  for (let i = 1; i < coords.length; i += 1) {
+    const distance = pointSegmentDistanceMeters(point, coords[i - 1], coords[i]);
+    if (distance < best.distance) best = { a: coords[i - 1], b: coords[i], distance };
+  }
+  return best;
+}
+
+function offsetPerpendicular(center, a, b, meters, side) {
+  const lat0 = center[1];
+  const c = toXY(center, lat0);
+  const p1 = toXY(a, lat0);
+  const p2 = toXY(b, lat0);
+  const dx = p2[0] - p1[0];
+  const dy = p2[1] - p1[1];
+  const length = Math.max(1, Math.hypot(dx, dy));
+  const px = (-dy / length) * meters * side;
+  const py = (dx / length) * meters * side;
+  const rad = Math.PI / 180;
+  const metersPerDegreeLng = Math.max(1, 111320 * Math.cos(lat0 * rad));
+  return [
+    center[0] + px / metersPerDegreeLng,
+    center[1] + py / 110540
+  ];
+}
+
+function detourWaypoints(fastestRoute, cameraPoints) {
+  const center = cameraCentroid(cameraPoints);
+  const segment = closestRouteSegment(fastestRoute, center);
+  const waypoints = [];
+  DETOUR_OFFSETS_METERS.forEach(distance => {
+    waypoints.push(offsetPerpendicular(center, segment.a, segment.b, distance, 1));
+    waypoints.push(offsetPerpendicular(center, segment.a, segment.b, distance, -1));
+  });
+  return waypoints;
+}
+
+async function buildLowerExposureRoute(fastestRoute, cameraPoints, allPoints) {
+  if (!lastOrigin || !lastDestination || !cameraPoints.length) return null;
+  const waypoints = detourWaypoints(fastestRoute, cameraPoints);
+  const results = await Promise.allSettled(
+    waypoints.map(waypoint => getRouteViaWaypoint(lastOrigin, lastDestination, waypoint))
+  );
+
+  const candidates = results
+    .filter(result => result.status === 'fulfilled')
+    .map(result => result.value)
+    .filter(route => route.duration <= fastestRoute.duration * PRIVACY_ROUTE_MAX_FACTOR)
+    .map(route => ({ route, count: exposureCount(route, allPoints) }));
+
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => a.count - b.count || a.route.duration - b.route.duration);
+  const best = candidates[0];
+  const fastestCount = exposureCount(fastestRoute, allPoints);
+  if (best.count >= fastestCount) return null;
+  best.route._dflcktKind = 'privacy';
+  best.route._dflcktExposureCount = best.count;
+  return best.route;
+}
+
+async function scoreVisibleRoutes(routes) {
   try {
     const points = loadedAlprPoints();
     if (!points.length) {
       setMessage('Routes found. Known-ALPR data is still loading; route exposure could not be scored on this pass.', 'success');
       return;
     }
-    const counts = routes.map(route => exposureCount(route, points));
-    renderRouteCards(routes, counts);
+
+    const sorted = [...routes].sort((a, b) => a.duration - b.duration);
+    const fastestRoute = sorted[0];
+    const initialCounts = routes.map(route => exposureCount(route, points));
+    renderRouteCards(routes, initialCounts);
     showApproximateAlprAreas(pointsNearAnyActiveRoute(points));
-    const best = Math.min(...counts);
-    setMessage(`Routes scored against the current known-ALPR dataset. Lowest candidate on this trip: ${best} known ALPR location${best === 1 ? '' : 's'}.`, 'success');
+
+    const fastestCameraPoints = points.filter(point => pointToRouteDistanceMeters(point, fastestRoute.geometry.coordinates) <= ROUTE_MATCH_METERS);
+    if (!fastestCameraPoints.length) {
+      setMessage('Fastest route has no known ALPR locations in the currently loaded dataset.', 'success');
+      return;
+    }
+
+    setMessage('Routes scored. Searching for a lower-exposure route within the 2× travel-time limit…', 'success');
+    const privacyRoute = await buildLowerExposureRoute(fastestRoute, fastestCameraPoints, points);
+
+    if (!privacyRoute) {
+      const best = Math.min(...initialCounts);
+      setMessage(`Routes scored. No lower-exposure detour was found in this proof-of-concept search. Lowest current route: ${best} known ALPR location${best === 1 ? '' : 's'}.`, 'success');
+      return;
+    }
+
+    const conventionalAlternates = sorted.filter(route => route !== fastestRoute).slice(0, 1);
+    activeRoutes = [fastestRoute, ...conventionalAlternates, privacyRoute];
+    const counts = activeRoutes.map(route => route._dflcktExposureCount ?? exposureCount(route, points));
+    drawRouteSet(activeRoutes, lastOrigin, lastDestination);
+    renderRouteCards(activeRoutes, counts);
+
+    map.once('idle', () => {
+      const refreshedPoints = loadedAlprPoints();
+      if (refreshedPoints.length) {
+        const refreshedCounts = activeRoutes.map(route => exposureCount(route, refreshedPoints));
+        privacyRoute._dflcktExposureCount = refreshedCounts[activeRoutes.indexOf(privacyRoute)];
+        renderRouteCards(activeRoutes, refreshedCounts);
+        showApproximateAlprAreas(pointsNearAnyActiveRoute(refreshedPoints));
+        const privacyCount = refreshedCounts[activeRoutes.indexOf(privacyRoute)];
+        const fastestCount = refreshedCounts[0];
+        setMessage(`Lower-exposure route found: ${privacyCount} known ALPR location${privacyCount === 1 ? '' : 's'} vs ${fastestCount} on fastest.`, 'success');
+      }
+    });
   } catch (error) {
-    console.warn('ALPR scoring proof failed:', error);
-    setMessage('Routes found. ALPR exposure scoring is temporarily unavailable.', 'success');
+    console.warn('ALPR scoring/search proof failed:', error);
+    setMessage('Routes found. Lower-exposure route search is temporarily unavailable.', 'success');
   }
 }
 
 function renderRouteCards(routes, exposureCounts = null) {
-  const sorted = [...routes].sort((a, b) => a.duration - b.duration);
-  const fastestDisplayMinutes = minutes(sorted[0].duration);
+  const fastestRoute = [...routes].sort((a, b) => a.duration - b.duration)[0];
+  const fastestDisplayMinutes = minutes(fastestRoute.duration);
   routeResults.innerHTML = '';
 
-  sorted.slice(0, 3).forEach((route, index) => {
-    const originalIndex = routes.indexOf(route);
-    const count = exposureCounts ? exposureCounts[originalIndex] : null;
+  routes.slice(0, 3).forEach((route, index) => {
+    const count = exposureCounts ? exposureCounts[index] : null;
     const displayMinutes = minutes(route.duration);
     const card = document.createElement('article');
-    card.className = `route-result ${index === 0 ? 'fastest' : ''}`;
+    const isFastest = route === fastestRoute;
+    const isPrivacy = route._dflcktKind === 'privacy';
+    card.className = `route-result ${isFastest ? 'fastest' : ''} ${isPrivacy ? 'privacy' : ''}`.trim();
     const deltaMinutes = Math.max(0, displayMinutes - fastestDisplayMinutes);
-    const delta = index === 0 ? '' : `+${deltaMinutes} min vs fastest`;
-    const label = index === 0 ? 'Fastest' : `Alternate route ${index}`;
+    const delta = isFastest ? '' : `+${deltaMinutes} min vs fastest`;
+    const label = isFastest ? 'Fastest' : (isPrivacy ? 'Lower exposure' : 'Alternate route');
     card.innerHTML = `
       <div>
         <span class="route-result-label">${label}</span>
@@ -350,6 +485,7 @@ routeForm?.addEventListener('submit', async event => {
   try {
     const [origin, destination] = await Promise.all([geocode(from), geocode(to)]);
     const routes = await getRoutes(origin, destination);
+    routes.forEach(route => { delete route._dflcktKind; delete route._dflcktExposureCount; });
     renderRouteCards(routes);
     drawRoutes(routes, origin, destination);
     setMessage(`Showing candidate routes from ${origin.label} to ${destination.label}. Loading known-ALPR exposure…`, 'success');
