@@ -308,18 +308,21 @@ function scoreVisibleRoutes(routes) {
 
 function renderRouteCards(routes, exposureCounts = null) {
   const sorted = [...routes].sort((a, b) => a.duration - b.duration);
+  const fastestDisplayMinutes = minutes(sorted[0].duration);
   routeResults.innerHTML = '';
 
   sorted.slice(0, 3).forEach((route, index) => {
     const originalIndex = routes.indexOf(route);
     const count = exposureCounts ? exposureCounts[originalIndex] : null;
+    const displayMinutes = minutes(route.duration);
     const card = document.createElement('article');
     card.className = `route-result ${index === 0 ? 'fastest' : ''}`;
-    const delta = index === 0 ? '' : `+${Math.max(0, minutes(route.duration - sorted[0].duration))} min vs fastest`;
+    const deltaMinutes = Math.max(0, displayMinutes - fastestDisplayMinutes);
+    const delta = index === 0 ? '' : `+${deltaMinutes} min vs fastest`;
     card.innerHTML = `
       <div>
         <span class="route-result-label">${index === 0 ? 'Fastest' : `Candidate ${index + 1}`}</span>
-        <strong>${minutes(route.duration)} min</strong>
+        <strong>${displayMinutes} min</strong>
       </div>
       <div class="route-result-meta">
         <span>${miles(route.distance)} mi</span>
