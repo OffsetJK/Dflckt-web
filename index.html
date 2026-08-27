@@ -10,7 +10,7 @@
 <body>
   <header class="site-header">
     <a class="brand" href="#top" aria-label="DFLCKT home">DFLCKT</a>
-    <nav aria-label="Primary navigation"><a href="#how">How it works</a><a href="#privacy">Privacy</a><a class="nav-cta" href="#check">Check your route</a></nav>
+    <nav aria-label="Primary navigation"><a href="#how">How it works</a><a href="#privacy">Privacy</a><a href="check-your-route.html">Check your route</a><a class="nav-cta" href="#updates">Get updates</a></nav>
   </header>
   <main id="top">
     <section class="hero">
@@ -19,11 +19,31 @@
         <h1>See what's ahead.<br>Know who's watching.<br>Choose your way.</h1>
         <p class="lede"><strong>Your privacy shouldn't cost you your privacy.</strong> DFLCKT is designed to help you make that choice without creating another record of where you've been.</p>
         <p class="lede">Compare travel time with <strong>known roadside surveillance exposure</strong> and choose the route that fits your priorities.</p>
-        <div class="hero-actions"><a class="button primary" href="#check">Check your route</a><a class="button secondary" href="#how">How it works</a></div>
+        <div class="hero-actions"><a class="button primary" href="#updates">Get DFLCKT updates</a><a class="button secondary" href="check-your-route.html">Check your route</a></div>
         <p class="microcopy">DFLCKT works from known, mapped infrastructure. “Lowest known exposure” is not a guarantee that a route is unmonitored.</p>
       </div>
       <div class="logo-stage" aria-label="DFLCKT route mark">
         <img class="hero-logo" src="IMG_3881.jpeg" alt="DFLCKT route mark with blue, green and red paths and yellow diamond">
+      </div>
+    </section>
+
+    <section id="updates" class="early-signup" aria-labelledby="updates-title">
+      <div class="early-signup-copy">
+        <p class="eyebrow">Coverage + launch updates</p>
+        <h2 id="updates-title">Want DFLCKT where you drive?</h2>
+        <p>Leave your ZIP and email. The ZIP tells us where people want coverage; the email lets us tell you when DFLCKT reaches your area.</p>
+      </div>
+      <div class="check-card early-signup-card">
+        <form class="interest-form" data-interest-form novalidate>
+          <div class="form-grid">
+            <label><span>Email</span><input type="email" name="email" autocomplete="email" inputmode="email" placeholder="you@example.com" required></label>
+            <label><span>ZIP code</span><input type="text" name="zip_code" autocomplete="postal-code" inputmode="numeric" maxlength="10" placeholder="48307" required></label>
+          </div>
+          <label class="hp-field" aria-hidden="true">Company<input type="text" name="company" tabindex="-1" autocomplete="off"></label>
+          <p class="consent-copy">By submitting, you agree that DFLCKT may store the email address and ZIP code you provide for coverage-interest and launch updates. We do not need your route history to add you to this list.</p>
+          <button class="button primary form-submit" type="submit">Notify me when coverage reaches my area</button>
+          <p class="form-message" data-form-message aria-live="polite"></p>
+        </form>
       </div>
     </section>
 
@@ -47,10 +67,11 @@
       <p class="microcopy">DFLCKT distinguishes documented facts from inference. We will not claim a camera does not record unless authoritative system-specific information supports that statement.</p>
     </section>
     <section id="check" class="check-section">
-      <div><p class="eyebrow">Early access</p><h2>Check Your Route is launching first in limited coverage areas.</h2><p>DFLCKT's first route comparisons are being built from verified infrastructure data and actual road routes. Coverage will expand as the dataset is validated.</p></div>
-      <div class="check-card"><p class="status"><span></span> Limited coverage launching soon</p><h3>DFLCKT is coming online.</h3><p>The first public route-checking areas are in development now. Return soon to see where coverage is available.</p><a class="button primary" href="check-your-route.html">Check your route</a></div>
+      <div><p class="eyebrow">Live proof of concept</p><h2>Check your route now.</h2><p>DFLCKT's first public route comparison is live. Enter a start and destination to compare real road routes against known ALPR exposure and see whether a lower-exposure alternative is available.</p></div>
+      <div class="check-card"><p class="status"><span></span> Early routing proof live</p><h3>See the tradeoff for yourself.</h3><p>Route results are still proof-of-concept and coverage can be incomplete, but the routing engine is live today.</p><a class="button primary" href="check-your-route.html">Check your route</a></div>
     </section>
   </main>
   <footer><a class="brand" href="#top">DFLCKT</a><p>See what's ahead. Know who's watching. Choose your way.</p><p class="footer-note">DFLCKT identifies known mapped infrastructure from available sources. Results may be incomplete or outdated and should not be interpreted as a guarantee that a road or route is unmonitored.</p></footer>
+  <script src="signup.js" defer></script>
 </body>
 </html>
