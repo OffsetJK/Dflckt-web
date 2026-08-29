@@ -49,8 +49,10 @@ async function parseRouteCards(cards) {
     const label = ((await card.locator('.route-result-label').textContent()) || '').trim();
     const fastest = await card.evaluate(element => element.classList.contains('fastest'));
     const privacy = await card.evaluate(element => element.classList.contains('privacy'));
-    const durationMatch = text.match(/(\d+)\s+min/);
-    const distanceMatch = text.match(/([\d.]+)\s+mi/);
+    const durationText = (await card.locator('.route-result strong').textContent()) || '';
+    const distanceText = (await card.locator('.route-result-meta span').first().textContent()) || '';
+    const durationMatch = durationText.match(/(\d+)\s+min\b/);
+    const distanceMatch = distanceText.match(/([\d.]+)\s+mi\b/);
     const exposureMatch = text.match(/(\d+) known ALPR location/);
     return {
       label: label || 'Unknown',
