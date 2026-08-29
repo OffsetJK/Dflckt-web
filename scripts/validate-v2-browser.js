@@ -225,13 +225,20 @@ async function runBrowserCase(browser, testCase, experimental) {
       status: response.status(),
       alternatives: alternativesValue === 'true' ? true : alternativesValue === 'false' ? false : null,
       parseSuccess: false,
-      routeCount: null
+      routeCount: null,
+      routes: []
     };
     responseMetadata.push(metadata);
     if (!response.ok()) return;
     routeResponseTasks.push(response.json().then(body => {
       metadata.parseSuccess = true;
       metadata.routeCount = Array.isArray(body?.routes) ? body.routes.length : 0;
+      metadata.routes = Array.isArray(body?.routes)
+        ? body.routes.map(route => ({
+          roundedDistanceMiles: displayMiles(route.distance),
+          roundedDurationMinutes: roundMinutes(route.duration)
+        }))
+        : [];
       if (body?.routes?.length) {
         routeResponses.push(...body.routes.map(route => ({
           route,
