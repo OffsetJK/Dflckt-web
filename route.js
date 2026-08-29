@@ -289,6 +289,108 @@ function cameraCentroid(points) {
   return [total[0] / points.length, total[1] / points.length];
 }
 
+function routeDistanceMeters(a, b) {
+  const lat0 = (a[1] + b[1]) / 2;
+  const dx = (b[0] - a[0]) * 111320 * Math.cos(lat0 * Math.PI / 180);
+  const dy = (b[1] - a[1]) * 110540;
+  return Math.hypot(dx, dy);
+}
+
+function routeProgressMeters(route, point) {
+  const coords = route.geometry.coordinates;
+  let accumulated = 0;
+  let bestProgress = 0;
+  let bestDistance = Infinity;
+
+  for (let i = 1; i < coords.length; i += 1) {
+    const a = coords[i - 1];
+    const b = coords[i];
+    const distance = pointSegmentDistanceMeters(point, a, b);
+    const segmentLength = routeDistanceMeters(a, b);
+    const projected = Math.max(0, Math.min(1, ((point[0] - a[0]) * (b[0] - a[0]) + (point[1] - a[1]) * (b[1] - a[1])) / ((b[0] - a[0]) * (b[0] - a[0]) + (b[1] - a[1]) * (b[1] - a[1]))));
+    const candidateProgress = accumulated + (projected * segmentLength);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestProgress = candidateProgress;
+    }
+    accumulated += segmentLength;
+  }
+
+  return bestProgress;
+}
+
+function clusterRouteProgressPoints(route, points, gapMeters = 1500) {
+  if (!route || !points.length) return [];
+  const ordered = [...points]
+    .map(point => ({ point, progress: routeProgressMeters(route, point) }))
+    .sort((a, b) => a.progress - b.progress);
+
+  const clusters = [];
+  let current = null;
+
+  ordered.forEach(entry => {
+    if (!current) {
+      current = {
+        points: [entry.point],
+        startMeters: entry.progress,
+        endMeters: entry.progress,
+        centerMeters: entry.progress
+      };
+      return;
+    }
+
+    const previousProgress = current.endMeters;
+    if (entry.progress - previousProgress <= gapMeters) {
+      current.points.push(entry.point);
+      current.endMeters = entry.progress;
+      current.centerMeters = current.points.reduce((sum, point) => sum + routeProgressMeters(route, point), 0) / current.points.length;
+      return;
+    }
+
+    clusters.push({
+      count: current.points.length,
+      startMeters: Math.round(current.startMeters),
+      endMeters: Math.round(current.endMeters),
+      centerMeters: Math.round(current.centerMeters)
+    });
+
+    current = {
+      points: [entry.point],
+      startMeters: entry.progress,
+      endMeters: entry.progress,
+      centerMeters: entry.progress
+    };
+  });
+
+  if (current) {
+    clusters.push({
+      count: current.points.length,
+      startMeters: Math.round(current.startMeters),
+      endMeters: Math.round(current.endMeters),
+      centerMeters: Math.round(current.centerMeters)
+    });
+  }
+
+  return clusters;
+}
+
+function logFastestRouteAlprDiagnostics(route, points) {
+  const clusters = clusterRouteProgressPoints(route, points);
+  const summary = clusters.map((cluster, index) => ({
+    index: index + 1,
+    cameraCount: cluster.count,
+    startMeters: cluster.startMeters,
+    endMeters: cluster.endMeters,
+    centerMeters: cluster.centerMeters
+  }));
+
+  console.info('[DFLCKT ALPR diagnostics]', {
+    totalFastestRouteEncounters: points.length,
+    clusterCount: clusters.length,
+    clusters: summary
+  });
+}
+
 function closestRouteSegment(route, point) {
   const coords = route.geometry.coordinates;
   let best = { a: coords[0], b: coords[1], distance: Infinity };
@@ -344,6 +446,7 @@ async function scoreVisibleRoutes(routes) {
     showApproximateAlprAreas(pointsNearAnyActiveRoute(points));
 
     const fastestCameraPoints = points.filter(point => pointToRouteDistanceMeters(point, fastestRoute.geometry.coordinates) <= ROUTE_MATCH_METERS);
+    logFastestRouteAlprDiagnostics(fastestRoute, fastestCameraPoints);
     setMessage(`Scored against ${points.length.toLocaleString()} known ALPR positions in the surrounding corridor. Searching initial detours…`, 'success');
 
     const generatedCandidates = fastestCameraPoints.length
