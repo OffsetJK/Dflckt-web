@@ -64,11 +64,29 @@ async function parseRouteCards(cards) {
 }
 
 function matchResponseRoute(card, responseRoutes) {
-  if (!card || !responseRoutes.length) return null;
-  return responseRoutes.find(route =>
-    displayMiles(route.distance) === card.distanceMiles &&
-    roundMinutes(route.duration) === card.durationMinutes
-  ) || null;
+  if (!card) return [];
+  return responseRoutes.filter(route =>
+    Math.abs(displayMiles(route.route.distance) - card.distanceMiles) < 0.1 &&
+    roundMinutes(route.route.duration) === card.durationMinutes
+  );
+}
+
+function sanitizedRouteMetadata(responseRoute) {
+  return {
+    sequence: responseRoute.sequence,
+    alternatives: responseRoute.alternatives,
+    routeCount: responseRoute.routeCount,
+    roundedDistanceMiles: displayMiles(responseRoute.route.distance),
+    roundedDurationMinutes: roundMinutes(responseRoute.route.duration)
+  };
+}
+
+function throwMatchError(caseName, cardName, candidates) {
+  throw new Error(JSON.stringify({
+    case: caseName,
+    card: cardName,
+    candidates: candidates.map(sanitizedRouteMetadata)
+  }));
 }
 
 function distanceMeters(a, b) {
@@ -149,6 +167,7 @@ async function runBrowserCase(browser, testCase, experimental) {
   let routeIntercepted = false;
   const routeResponses = [];
   const routeResponseTasks = [];
+  let directionsResponseSequence = 0;
   const directionsRequests = { initial: 0, generated: 0 };
   const v2Events = [];
 
@@ -180,8 +199,17 @@ async function runBrowserCase(browser, testCase, experimental) {
   page.on('response', async response => {
     const url = new URL(response.url());
     if (url.origin !== 'https://api.mapbox.com' || !url.pathname.startsWith(MAPBOX_DIRECTIONS_PATH) || !response.ok()) return;
+    const sequence = ++directionsResponseSequence;
+    const alternatives = url.searchParams.get('alternatives') === 'true';
     routeResponseTasks.push(response.json().then(body => {
-      if (body?.routes?.length) routeResponses.push(...body.routes);
+      if (body?.routes?.length) {
+        routeResponses.push(...body.routes.map(route => ({
+          route,
+          sequence,
+          alternatives,
+          routeCount: body.routes.length
+        })));
+      }
     }).catch(() => {}));
   });
 
@@ -226,10 +254,16 @@ async function runBrowserCase(browser, testCase, experimental) {
     if (!cards.length) throw new Error(`${testCase.name}: no user-facing route results rendered`);
     const fastestCard = cards.find(card => card.fastest) || cards[0];
     const privacyCard = cards.find(card => card.privacy) || null;
-    const fastestRoute = matchResponseRoute(fastestCard, routeResponses);
-    const privacyRoute = matchResponseRoute(privacyCard, routeResponses);
-    if (!fastestRoute) throw new Error(`${testCase.name}: fastest route could not be matched to a Directions response`);
-    if (privacyCard && !privacyRoute) throw new Error(`${testCase.name}: privacy route could not be matched to a Directions response`);
+    const fastestCandidates = matchResponseRoute(fastestCard, routeResponses);
+    const privacyCandidates = matchResponseRoute(privacyCard, routeResponses);
+    if (fastestCandidates.length !== 1) {
+      throwMatchError(testCase.name, 'fastest', fastestCandidates);
+    }
+    if (privacyCard && privacyCandidates.length !== 1) {
+      throwMatchError(testCase.name, 'privacy', privacyCandidates);
+    }
+    const fastestRoute = fastestCandidates[0].route;
+    const privacyRoute = privacyCandidates[0]?.route || null;
 
     const result = {
       case: testCase.name,
