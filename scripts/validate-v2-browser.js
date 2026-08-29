@@ -8,6 +8,8 @@ const { chromium } = require('playwright');
 const PRODUCTION_ORIGIN = 'https://dflckt.com';
 const ROUTE_PAGE = `${PRODUCTION_ORIGIN}/check-your-route.html`;
 const MAPBOX_DIRECTIONS_PATH = '/directions/v5/';
+const ALPR_INDEX_ORIGIN = 'https://tiles.dontgetflocked.com';
+const ALPR_INDEX_PATH = '/cameras-us-hourly-index.bin';
 const MAX_WAIT_MS = 120000;
 
 const routeCases = [
@@ -53,7 +55,8 @@ async function parseRouteCards(cards) {
     const distanceText = (await card.locator('.route-result-meta span').first().textContent()) || '';
     const durationMatch = durationText.match(/(\d+)\s+min\b/);
     const distanceMatch = distanceText.match(/([\d.]+)\s+mi\b/);
-    const exposureMatch = text.match(/(\d+) known ALPR location/);
+    const exposureText = (await card.locator('.route-result-meta span').nth(2).textContent()) || '';
+    const exposureMatch = exposureText.match(/(\d+) known ALPR location/);
     return {
       label: label || 'Unknown',
       fastest,
@@ -188,6 +191,13 @@ async function runBrowserCase(browser, testCase, experimental) {
   const routeResponses = [];
   const routeResponseTasks = [];
   const responseMetadata = [];
+  const alprDiagnostics = {
+    datasetRequestObserved: false,
+    httpStatus: null,
+    loadParseSuccess: false,
+    scoringSuccess: false,
+    failureStage: null
+  };
   let directionsResponseSequence = 0;
   const directionsRequests = { initial: 0, generated: 0 };
   const v2Events = [];
@@ -212,6 +222,10 @@ async function runBrowserCase(browser, testCase, experimental) {
 
   page.on('request', request => {
     const url = new URL(request.url());
+    if (url.origin === ALPR_INDEX_ORIGIN && url.pathname === ALPR_INDEX_PATH) {
+      alprDiagnostics.datasetRequestObserved = true;
+      return;
+    }
     if (url.origin !== 'https://api.mapbox.com' || !url.pathname.startsWith(MAPBOX_DIRECTIONS_PATH)) return;
     if (url.searchParams.get('alternatives') === 'true') directionsRequests.initial += 1;
     if (url.searchParams.get('alternatives') === 'false') directionsRequests.generated += 1;
@@ -219,6 +233,11 @@ async function runBrowserCase(browser, testCase, experimental) {
 
   page.on('response', async response => {
     const url = new URL(response.url());
+    if (url.origin === ALPR_INDEX_ORIGIN && url.pathname === ALPR_INDEX_PATH) {
+      alprDiagnostics.httpStatus = response.status();
+      if (!response.ok()) alprDiagnostics.failureStage = 'load';
+      return;
+    }
     if (url.origin !== 'https://api.mapbox.com' || !url.pathname.startsWith(MAPBOX_DIRECTIONS_PATH)) return;
     const sequence = ++directionsResponseSequence;
     const alternativesValue = url.searchParams.get('alternatives');
@@ -283,10 +302,26 @@ async function runBrowserCase(browser, testCase, experimental) {
     await page.locator('input[name="from"]').fill(testCase.from);
     await page.locator('input[name="to"]').fill(testCase.to);
     await page.locator('[data-route-submit]').click();
-    await page.waitForFunction(() => {
+    const scoringState = await page.waitForFunction(() => {
       const message = document.querySelector('[data-route-message]')?.textContent || '';
-      return message.includes('Lowest found exposure') || message.includes('No lower-exposure route') || message.includes('could not be loaded') || message.includes('failed');
-    });
+      const cards = [...document.querySelectorAll('[data-route-results] .route-result')];
+      const hasNumericExposure = cards.some(card => /\d+ known ALPR location/.test(card.querySelector('.route-result-meta span:nth-child(3)')?.textContent || ''));
+      if ((message.includes('Lowest found exposure') || message.includes('No lower-exposure route')) && hasNumericExposure) return 'success';
+      if (message.includes('could not be loaded') || message.includes('failed')) return 'failure';
+      return false;
+    }).then(handle => handle.jsonValue());
+
+    if (scoringState === 'failure') {
+      alprDiagnostics.failureStage = alprDiagnostics.failureStage || (alprDiagnostics.httpStatus === null ? 'request' : 'load/parse');
+      throw new Error(JSON.stringify({
+        case: testCase.name,
+        implementation: experimental ? 'V2 experimental' : 'V1 production control',
+        error: 'ALPR scoring failed',
+        alprDiagnostics
+      }));
+    }
+    alprDiagnostics.loadParseSuccess = true;
+    alprDiagnostics.scoringSuccess = true;
 
     await drainRouteResponseTasks(routeResponseTasks);
     const cards = await parseRouteCards(await page.locator('[data-route-results] .route-result').all());
@@ -328,7 +363,8 @@ async function runBrowserCase(browser, testCase, experimental) {
         initialConventional: directionsRequests.initial,
         generatedPrivacy: directionsRequests.generated,
         total: directionsRequests.initial + directionsRequests.generated
-      }
+      },
+      alprDiagnostics
     };
 
     if (experimental) {
