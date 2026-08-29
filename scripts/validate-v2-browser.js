@@ -49,7 +49,7 @@ async function parseRouteCards(cards) {
     const label = ((await card.locator('.route-result-label').textContent()) || '').trim();
     const fastest = await card.evaluate(element => element.classList.contains('fastest'));
     const privacy = await card.evaluate(element => element.classList.contains('privacy'));
-    const durationText = (await card.locator('.route-result strong').textContent()) || '';
+    const durationText = (await card.locator('strong').textContent()) || '';
     const distanceText = (await card.locator('.route-result-meta span').first().textContent()) || '';
     const durationMatch = durationText.match(/(\d+)\s+min\b/);
     const distanceMatch = distanceText.match(/([\d.]+)\s+mi\b/);
