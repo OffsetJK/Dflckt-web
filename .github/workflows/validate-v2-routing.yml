@@ -24,6 +24,21 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Inject Mapbox token for validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          p = Path('route.js')
+          text = p.read_text()
+          token = os.environ['MAPBOX_PUBLIC_TOKEN']
+          if '__MAPBOX_PUBLIC_TOKEN__' not in text:
+              raise SystemExit('Mapbox token placeholder not found')
+          p.write_text(text.replace('__MAPBOX_PUBLIC_TOKEN__', token))
+          PY
+
       - name: Run V2 routing validation
         shell: bash
         run: |
