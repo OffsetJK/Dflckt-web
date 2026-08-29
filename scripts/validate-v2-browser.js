@@ -46,13 +46,16 @@ function displayMiles(meters) {
 async function parseRouteCards(cards) {
   return Promise.all(cards.map(async card => {
     const text = ((await card.textContent()) || '').replace(/\s+/g, ' ').trim();
+    const label = ((await card.locator('.route-result-label').textContent()) || '').trim();
+    const fastest = await card.evaluate(element => element.classList.contains('fastest'));
+    const privacy = await card.evaluate(element => element.classList.contains('privacy'));
     const durationMatch = text.match(/(\d+)\s+min/);
     const distanceMatch = text.match(/([\d.]+)\s+mi/);
     const exposureMatch = text.match(/(\d+) known ALPR location/);
     return {
-      label: card.querySelector('.route-result-label')?.textContent.trim() || 'Unknown',
-      fastest: card.classList.contains('fastest'),
-      privacy: card.classList.contains('privacy') || text.includes('Lower exposure'),
+      label: label || 'Unknown',
+      fastest,
+      privacy: privacy || text.includes('Lower exposure'),
       distanceMiles: distanceMatch ? Number(distanceMatch[1]) : null,
       durationMinutes: durationMatch ? Number(durationMatch[1]) : null,
       exposure: exposureMatch ? Number(exposureMatch[1]) : null
