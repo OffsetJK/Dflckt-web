@@ -81,12 +81,30 @@ function sanitizedRouteMetadata(responseRoute) {
   };
 }
 
-function throwMatchError(caseName, cardName, candidates) {
+function throwMatchError(caseName, cardName, card, candidates, responseMetadata) {
   throw new Error(JSON.stringify({
     case: caseName,
     card: cardName,
+    directionsResponsesObserved: responseMetadata.length,
+    directionsResponsesParsed: responseMetadata.filter(response => response.parseSuccess).length,
+    directionsResponsesDiscardedOrFailed: responseMetadata.filter(response => !response.parseSuccess).length,
+    responses: responseMetadata,
+    card: {
+      distanceMiles: card?.distanceMiles ?? null,
+      durationMinutes: card?.durationMinutes ?? null
+    },
+    matchingCandidateCount: candidates.length,
     candidates: candidates.map(sanitizedRouteMetadata)
   }));
+}
+
+async function drainRouteResponseTasks(routeResponseTasks) {
+  let drainedCount = 0;
+  while (drainedCount < routeResponseTasks.length) {
+    const pendingTasks = routeResponseTasks.slice(drainedCount);
+    drainedCount += pendingTasks.length;
+    await Promise.all(pendingTasks);
+  }
 }
 
 function distanceMeters(a, b) {
@@ -167,6 +185,7 @@ async function runBrowserCase(browser, testCase, experimental) {
   let routeIntercepted = false;
   const routeResponses = [];
   const routeResponseTasks = [];
+  const responseMetadata = [];
   let directionsResponseSequence = 0;
   const directionsRequests = { initial: 0, generated: 0 };
   const v2Events = [];
@@ -198,15 +217,26 @@ async function runBrowserCase(browser, testCase, experimental) {
 
   page.on('response', async response => {
     const url = new URL(response.url());
-    if (url.origin !== 'https://api.mapbox.com' || !url.pathname.startsWith(MAPBOX_DIRECTIONS_PATH) || !response.ok()) return;
+    if (url.origin !== 'https://api.mapbox.com' || !url.pathname.startsWith(MAPBOX_DIRECTIONS_PATH)) return;
     const sequence = ++directionsResponseSequence;
-    const alternatives = url.searchParams.get('alternatives') === 'true';
+    const alternativesValue = url.searchParams.get('alternatives');
+    const metadata = {
+      sequence,
+      status: response.status(),
+      alternatives: alternativesValue === 'true' ? true : alternativesValue === 'false' ? false : null,
+      parseSuccess: false,
+      routeCount: null
+    };
+    responseMetadata.push(metadata);
+    if (!response.ok()) return;
     routeResponseTasks.push(response.json().then(body => {
+      metadata.parseSuccess = true;
+      metadata.routeCount = Array.isArray(body?.routes) ? body.routes.length : 0;
       if (body?.routes?.length) {
         routeResponses.push(...body.routes.map(route => ({
           route,
           sequence,
-          alternatives,
+          alternatives: metadata.alternatives,
           routeCount: body.routes.length
         })));
       }
@@ -249,7 +279,7 @@ async function runBrowserCase(browser, testCase, experimental) {
       return message.includes('Lowest found exposure') || message.includes('No lower-exposure route') || message.includes('could not be loaded') || message.includes('failed');
     });
 
-    await Promise.all(routeResponseTasks);
+    await drainRouteResponseTasks(routeResponseTasks);
     const cards = await parseRouteCards(await page.locator('[data-route-results] .route-result').all());
     if (!cards.length) throw new Error(`${testCase.name}: no user-facing route results rendered`);
     const fastestCard = cards.find(card => card.fastest) || cards[0];
@@ -257,10 +287,10 @@ async function runBrowserCase(browser, testCase, experimental) {
     const fastestCandidates = matchResponseRoute(fastestCard, routeResponses);
     const privacyCandidates = matchResponseRoute(privacyCard, routeResponses);
     if (fastestCandidates.length !== 1) {
-      throwMatchError(testCase.name, 'fastest', fastestCandidates);
+      throwMatchError(testCase.name, 'fastest', fastestCard, fastestCandidates, responseMetadata);
     }
     if (privacyCard && privacyCandidates.length !== 1) {
-      throwMatchError(testCase.name, 'privacy', privacyCandidates);
+      throwMatchError(testCase.name, 'privacy', privacyCard, privacyCandidates, responseMetadata);
     }
     const fastestRoute = fastestCandidates[0].route;
     const privacyRoute = privacyCandidates[0]?.route || null;
