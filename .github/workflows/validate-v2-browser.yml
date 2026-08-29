@@ -1,0 +1,51 @@
+name: Validate V2 routing in browser
+
+on:
+  push:
+    branches:
+      - experimental
+
+jobs:
+  validate-v2-browser:
+    if: github.ref == 'refs/heads/experimental'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      MAPBOX_PUBLIC_TOKEN: ${{ secrets.MAPBOX_PUBLIC_TOKEN }}
+      PLAYWRIGHT_VERSION: '1.55.0'
+
+    steps:
+      - name: Check out experimental branch
+        uses: actions/checkout@v4
+        with:
+          ref: experimental
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install temporary Playwright
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${MAPBOX_PUBLIC_TOKEN:-}"
+          npm install --prefix "$RUNNER_TEMP/playwright" --no-save "playwright@${PLAYWRIGHT_VERSION}"
+          "$RUNNER_TEMP/playwright/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Run browser validation
+        shell: bash
+        env:
+          NODE_PATH: ${{ runner.temp }}/playwright/node_modules
+        run: |
+          set -euo pipefail
+          node scripts/validate-v2-browser.js > "$RUNNER_TEMP/v2-browser-results.json"
+          node -e "JSON.parse(require('fs').readFileSync(process.env.RUNNER_TEMP + '/v2-browser-results.json', 'utf8'))"
+
+      - name: Upload sanitized validation results
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-browser-validation-results
+          path: ${{ runner.temp }}/v2-browser-results.json
+          if-no-files-found: error
