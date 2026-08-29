@@ -1,7 +1,9 @@
 name: Validate V2 routing
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - experimental
 
 jobs:
   validate-v2-routing:
