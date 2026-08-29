@@ -43,9 +43,9 @@ function displayMiles(meters) {
   return Number((meters / 1609.344).toFixed(meters < 16093 ? 1 : 0));
 }
 
-function parseRouteCards(cards) {
-  return cards.map(card => {
-    const text = card.textContent.replace(/\s+/g, ' ').trim();
+async function parseRouteCards(cards) {
+  return Promise.all(cards.map(async card => {
+    const text = ((await card.textContent()) || '').replace(/\s+/g, ' ').trim();
     const durationMatch = text.match(/(\d+)\s+min/);
     const distanceMatch = text.match(/([\d.]+)\s+mi/);
     const exposureMatch = text.match(/(\d+) known ALPR location/);
@@ -57,7 +57,7 @@ function parseRouteCards(cards) {
       durationMinutes: durationMatch ? Number(durationMatch[1]) : null,
       exposure: exposureMatch ? Number(exposureMatch[1]) : null
     };
-  });
+  }));
 }
 
 function matchResponseRoute(card, responseRoutes) {
@@ -219,7 +219,7 @@ async function runBrowserCase(browser, testCase, experimental) {
     });
 
     await Promise.all(routeResponseTasks);
-    const cards = parseRouteCards(await page.locator('[data-route-results] .route-result').all());
+    const cards = await parseRouteCards(await page.locator('[data-route-results] .route-result').all());
     if (!cards.length) throw new Error(`${testCase.name}: no user-facing route results rendered`);
     const fastestCard = cards.find(card => card.fastest) || cards[0];
     const privacyCard = cards.find(card => card.privacy) || null;
