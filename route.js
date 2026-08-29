@@ -85,6 +85,17 @@ async function getRouteViaWaypoint(origin, destination, waypoint) {
   return routes[0];
 }
 
+function setRouteRuntimeContext(origin, destination) {
+  lastOrigin = origin;
+  lastDestination = destination;
+  return { origin: lastOrigin, destination: lastDestination };
+}
+
+function clearRouteRuntimeContext() {
+  lastOrigin = null;
+  lastDestination = null;
+}
+
 function ensureMap(center) {
   if (map) return;
   mapboxgl.accessToken = MAPBOX_TOKEN;
@@ -320,6 +331,15 @@ function routeProgressMeters(route, point) {
 }
 
 function clusterRouteProgressPoints(route, points, gapMeters = 1500) {
+  return clusterRouteProgressCameraGroups(route, points, gapMeters).map(cluster => ({
+    count: cluster.count,
+    startMeters: cluster.startMeters,
+    endMeters: cluster.endMeters,
+    centerMeters: cluster.centerMeters
+  }));
+}
+
+function clusterRouteProgressCameraGroups(route, points, gapMeters = 1500) {
   if (!route || !points.length) return [];
   const ordered = [...points]
     .map(point => ({ point, progress: routeProgressMeters(route, point) }))
@@ -348,6 +368,7 @@ function clusterRouteProgressPoints(route, points, gapMeters = 1500) {
     }
 
     clusters.push({
+      points: current.points,
       count: current.points.length,
       startMeters: Math.round(current.startMeters),
       endMeters: Math.round(current.endMeters),
@@ -364,6 +385,7 @@ function clusterRouteProgressPoints(route, points, gapMeters = 1500) {
 
   if (current) {
     clusters.push({
+      points: current.points,
       count: current.points.length,
       startMeters: Math.round(current.startMeters),
       endMeters: Math.round(current.endMeters),
@@ -418,6 +440,149 @@ function detourWaypoints(fastestRoute, cameraPoints) {
   ]);
 }
 
+function clusterDetourWaypoints(route, clusterPoints) {
+  const center = cameraCentroid(clusterPoints);
+  const segment = closestRouteSegment(route, center);
+  return DETOUR_OFFSETS_METERS.flatMap(distance => [
+    { distance, side: 1, waypoint: offsetPerpendicular(center, segment.a, segment.b, distance, 1) },
+    { distance, side: -1, waypoint: offsetPerpendicular(center, segment.a, segment.b, distance, -1) }
+  ]);
+}
+
+async function getRouteViaWaypoints(origin, destination, waypoints) {
+  const coords = [origin.coordinates, ...waypoints, destination.coordinates];
+  const routes = await directionsFor(coords, false);
+  return routes[0];
+}
+
+async function buildClusterGreedyDetoursV2(fastestRoute, cameraPoints, allPoints, maxClusters = 3, maxGeneratedRequests = 18) {
+  if (!lastOrigin || !lastDestination || !cameraPoints.length) {
+    const empty = [];
+    empty.diagnostics = {
+      totalClustersIdentified: 0,
+      processedClusters: 0,
+      skippedClusters: 0,
+      generatedDirectionsRequests: 0,
+      acceptedWaypointCount: 0,
+      finalExposure: exposureCount(fastestRoute, allPoints),
+      finalDuration: fastestRoute ? fastestRoute.duration : null,
+      maxDurationRuleRespected: true
+    };
+    return empty;
+  }
+
+  const orderedClusters = clusterRouteProgressCameraGroups(fastestRoute, cameraPoints, 1500).slice(0, maxClusters);
+  const diagnostics = [];
+  let currentRoute = fastestRoute;
+  let currentExposure = exposureCount(currentRoute, allPoints);
+  const acceptedWaypoints = [];
+  let generatedRequests = 0;
+  let processedClusters = 0;
+  let skippedClusters = 0;
+
+  for (let clusterIndex = 0; clusterIndex < orderedClusters.length; clusterIndex += 1) {
+    const cluster = orderedClusters[clusterIndex];
+    const clusterEncountered = cluster.points.some(point => pointToRouteDistanceMeters(point, currentRoute.geometry.coordinates) <= ROUTE_MATCH_METERS);
+    const clusterNumber = clusterIndex + 1;
+
+    if (!clusterEncountered) {
+      skippedClusters += 1;
+      const skipped = {
+        clusterNumber,
+        stillEncountered: false,
+        exposureBefore: currentExposure,
+        exposureAfter: currentExposure,
+        chosenSide: null,
+        chosenOffset: null,
+        resultingDuration: currentRoute.duration,
+        cumulativeWaypointCount: acceptedWaypoints.length,
+        note: 'cluster no longer encountered on current route'
+      };
+      diagnostics.push(skipped);
+      console.info('[DFLCKT ALPR cluster V2 skipped]', skipped);
+      continue;
+    }
+
+    processedClusters += 1;
+
+    let bestCandidate = null;
+    const candidateOptions = clusterDetourWaypoints(currentRoute, cluster.points);
+
+    for (const option of candidateOptions) {
+      if (generatedRequests >= maxGeneratedRequests) break;
+
+      const candidateRoute = await getRouteViaWaypoints(lastOrigin, lastDestination, [...acceptedWaypoints, option.waypoint]);
+      generatedRequests += 1;
+
+      if (candidateRoute.duration > fastestRoute.duration * PRIVACY_ROUTE_MAX_FACTOR) continue;
+
+      const candidateExposure = exposureCount(candidateRoute, allPoints);
+      if (candidateExposure >= currentExposure) continue;
+
+      if (!bestCandidate || candidateExposure < bestCandidate.count || (candidateExposure === bestCandidate.count && candidateRoute.duration < bestCandidate.route.duration)) {
+        bestCandidate = {
+          route: candidateRoute,
+          count: candidateExposure,
+          side: option.side,
+          offset: option.distance,
+          waypoint: option.waypoint
+        };
+      }
+    }
+
+    if (!bestCandidate) {
+      const rejected = {
+        clusterNumber,
+        stillEncountered: true,
+        exposureBefore: currentExposure,
+        exposureAfter: currentExposure,
+        chosenSide: null,
+        chosenOffset: null,
+        resultingDuration: currentRoute.duration,
+        cumulativeWaypointCount: acceptedWaypoints.length,
+        note: 'no candidate reduced exposure'
+      };
+      diagnostics.push(rejected);
+      console.info('[DFLCKT ALPR cluster V2 rejected]', rejected);
+      continue;
+    }
+
+    const beforeExposure = currentExposure;
+    currentRoute = bestCandidate.route;
+    currentExposure = bestCandidate.count;
+    acceptedWaypoints.push(bestCandidate.waypoint);
+
+    const accepted = {
+      clusterNumber,
+      stillEncountered: true,
+      exposureBefore: beforeExposure,
+      exposureAfter: currentExposure,
+      chosenSide: bestCandidate.side,
+      chosenOffset: bestCandidate.offset,
+      resultingDuration: currentRoute.duration,
+      cumulativeWaypointCount: acceptedWaypoints.length
+    };
+    diagnostics.push(accepted);
+    console.info('[DFLCKT ALPR cluster V2 accepted]', accepted);
+
+    if (generatedRequests >= maxGeneratedRequests) break;
+  }
+
+  const result = currentRoute === fastestRoute ? [] : [{ route: currentRoute, count: currentExposure, generated: true }];
+  result.diagnostics = {
+    totalClustersIdentified: orderedClusters.length,
+    processedClusters,
+    skippedClusters,
+    generatedDirectionsRequests: generatedRequests,
+    acceptedWaypointCount: acceptedWaypoints.length,
+    finalExposure: currentExposure,
+    finalDuration: currentRoute.duration,
+    maxDurationRuleRespected: currentRoute.duration <= fastestRoute.duration * PRIVACY_ROUTE_MAX_FACTOR
+  };
+
+  return result;
+}
+
 async function buildGeneratedDetours(fastestRoute, cameraPoints, allPoints) {
   if (!lastOrigin || !lastDestination || !cameraPoints.length) return [];
   const results = await Promise.allSettled(detourWaypoints(fastestRoute, cameraPoints)
@@ -450,7 +615,7 @@ async function scoreVisibleRoutes(routes) {
     setMessage(`Scored against ${points.length.toLocaleString()} known ALPR positions in the surrounding corridor. Searching initial detours…`, 'success');
 
     const generatedCandidates = fastestCameraPoints.length
-      ? await buildGeneratedDetours(fastestRoute, fastestCameraPoints, points)
+      ? await buildClusterGreedyDetoursV2(fastestRoute, fastestCameraPoints, points)
       : [];
     const allCandidates = [...conventionalCandidates, ...generatedCandidates];
     const best = chooseBestExposureCandidate(allCandidates, fastestRoute);
@@ -535,3 +700,27 @@ routeForm?.addEventListener('submit', async event => {
     routeButton.textContent = 'Show route choices';
   }
 });
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    buildClusterGreedyDetoursV2,
+    geocode,
+    getRoutes,
+    getRouteViaWaypoints,
+    directionsFor,
+    alprPointsForRoutes,
+    exposureCount,
+    clusterRouteProgressCameraGroups,
+    routeDistanceMeters,
+    pointToRouteDistanceMeters,
+    routeSearchBounds,
+    loadAlprIndex,
+    setRouteRuntimeContext,
+    clearRouteRuntimeContext,
+    MAPBOX_TOKEN
+  };
+}
+
+if (typeof globalThis !== 'undefined') {
+  globalThis.__DFLCKT_V2__ = { buildClusterGreedyDetoursV2, setRouteRuntimeContext, clearRouteRuntimeContext };
+}

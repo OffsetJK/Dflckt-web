@@ -1,0 +1,30 @@
+name: Validate V2 routing
+
+on:
+  workflow_dispatch:
+
+jobs:
+  validate-v2-routing:
+    if: github.ref == 'refs/heads/experimental'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      MAPBOX_PUBLIC_TOKEN: ${{ secrets.MAPBOX_PUBLIC_TOKEN }}
+    steps:
+      - name: Check out experimental branch
+        uses: actions/checkout@v4
+        with:
+          ref: experimental
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run V2 routing validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${MAPBOX_PUBLIC_TOKEN:-}"
+          node scripts/validate-v2-routing.js
