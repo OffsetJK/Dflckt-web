@@ -215,6 +215,10 @@ function summarizeV2Diagnostics(events, fastestExposure, fastestDuration) {
   };
 }
 
+async function prepareFixtureBufferForCase(testCase, initialRoutesPromise) {
+  return buildSyntheticAlprFixture(await initialRoutesPromise);
+}
+
 async function runBrowserCase(browser, testCase, experimental, fixtureState) {
   const context = await browser.newContext({ serviceWorkers: 'block' });
   await context.setDefaultTimeout(MAX_WAIT_MS);
@@ -316,7 +320,9 @@ async function runBrowserCase(browser, testCase, experimental, fixtureState) {
       const url = new URL(route.request().url());
       if (url.origin === ALPR_INDEX_ORIGIN && url.pathname === ALPR_INDEX_PATH) {
         alprDiagnostics.datasetRequestObserved = true;
-        if (!fixtureState.buffer) fixtureState.buffer = buildSyntheticAlprFixture(await initialRoutesPromise);
+        if (!fixtureState.buffer) {
+          throw new Error(`${testCase.name}: synthetic ALPR fixture was not prepared before interception`);
+        }
         await route.fulfill({ status: 200, contentType: 'application/octet-stream', body: fixtureState.buffer });
         return;
       }
@@ -337,7 +343,9 @@ async function runBrowserCase(browser, testCase, experimental, fixtureState) {
       const url = new URL(route.request().url());
       if (url.origin === ALPR_INDEX_ORIGIN && url.pathname === ALPR_INDEX_PATH) {
         alprDiagnostics.datasetRequestObserved = true;
-        if (!fixtureState.buffer) fixtureState.buffer = buildSyntheticAlprFixture(await initialRoutesPromise);
+        if (!fixtureState.buffer) {
+          throw new Error(`${testCase.name}: synthetic ALPR fixture was not prepared before interception`);
+        }
         await route.fulfill({ status: 200, contentType: 'application/octet-stream', body: fixtureState.buffer });
         return;
       }
@@ -346,6 +354,10 @@ async function runBrowserCase(browser, testCase, experimental, fixtureState) {
   }
 
   try {
+    if (!fixtureState.buffer) {
+      const preparedRoutes = await initialRoutesPromise;
+      fixtureState.buffer = await prepareFixtureBufferForCase(testCase, Promise.resolve(preparedRoutes));
+    }
     await page.goto(ROUTE_PAGE, { waitUntil: 'domcontentloaded' });
     const markerPresent = await page.evaluate(() => typeof window.__DFLCKT_V2__ === 'object' && window.__DFLCKT_V2__ !== null);
     if (experimental && (!routeIntercepted || !markerPresent)) {
@@ -440,6 +452,41 @@ async function runBrowserCase(browser, testCase, experimental, fixtureState) {
     const results = [];
     for (const testCase of routeCases) {
       const fixtureState = { buffer: null };
+      const preflight = await (async () => {
+        const routePage = await browser.newPage();
+        try {
+          const preflightRoutes = await new Promise((resolve, reject) => {
+            const context = routePage.context();
+            const routeHandler = (route) => {
+              const url = new URL(route.request().url());
+              if (url.origin !== 'https://api.mapbox.com' || !url.pathname.startsWith(MAPBOX_DIRECTIONS_PATH)) return;
+              if (url.searchParams.get('alternatives') !== 'true') return;
+              route.continue();
+            };
+            context.on('request', routeHandler);
+            routePage.goto(ROUTE_PAGE, { waitUntil: 'domcontentloaded' }).catch(reject);
+            routePage.on('console', () => {});
+            setTimeout(() => {
+              routePage.evaluate(() => {
+                const form = document.querySelector('[data-route-form]');
+                if (!form) return;
+                const from = form.querySelector('input[name="from"]');
+                const to = form.querySelector('input[name="to"]');
+                if (from && to) {
+                  from.value = testCase.from;
+                  to.value = testCase.to;
+                  form.dispatchEvent(new Event('submit', { cancelable: true }));
+                }
+              }).catch(reject);
+            }, 0);
+          });
+          return preflightRoutes;
+        } finally {
+          await routePage.close();
+        }
+      })();
+      const initialRoutesPromise = Promise.resolve(preflight);
+      fixtureState.buffer = await prepareFixtureBufferForCase(testCase, initialRoutesPromise);
       results.push(await runBrowserCase(browser, testCase, false, fixtureState));
       results.push(await runBrowserCase(browser, testCase, true, fixtureState));
     }
