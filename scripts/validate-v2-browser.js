@@ -457,11 +457,10 @@ async function runBrowserCase(browser, testCase, experimental, fixtureState) {
         try {
           const preflightRoutes = await new Promise((resolve, reject) => {
             const context = routePage.context();
-            const routeHandler = (route) => {
-              const url = new URL(route.request().url());
+            const routeHandler = (request) => {
+              const url = new URL(request.url());
               if (url.origin !== 'https://api.mapbox.com' || !url.pathname.startsWith(MAPBOX_DIRECTIONS_PATH)) return;
               if (url.searchParams.get('alternatives') !== 'true') return;
-              route.continue();
             };
             context.on('request', routeHandler);
             routePage.goto(ROUTE_PAGE, { waitUntil: 'domcontentloaded' }).catch(reject);
