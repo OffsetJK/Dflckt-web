@@ -61,13 +61,16 @@ async function geocode(query) {
   };
 }
 
-async function directionsFor(coords, alternatives = false) {
+async function directionsFor(coords, alternatives = false, excludePoints = []) {
   const packed = coords.map(c => `${c[0]},${c[1]}`).join(';');
   const url = new URL(`https://api.mapbox.com/directions/v5/mapbox/driving/${packed}`);
   url.searchParams.set('alternatives', alternatives ? 'true' : 'false');
   url.searchParams.set('geometries', 'geojson');
   url.searchParams.set('overview', 'full');
   url.searchParams.set('steps', 'false');
+  excludePoints.slice(0, 50).forEach(([lng, lat]) => {
+    url.searchParams.append('exclude', `point(${Number(lng).toFixed(6)},${Number(lat).toFixed(6)})`);
+  });
   url.searchParams.set('access_token', MAPBOX_TOKEN);
   const response = await fetch(url);
   if (!response.ok) throw await apiError(response, 'Routing request failed');
@@ -449,6 +452,44 @@ function clusterDetourWaypoints(route, clusterPoints) {
   ]);
 }
 
+function representativeExclusionPoints(route, points, maxExclusions = 50) {
+  if (!route || !points.length) return [];
+  const clusters = clusterRouteProgressCameraGroups(route, points, 1500);
+  const representative = [];
+
+  for (const cluster of clusters) {
+    const ordered = [...cluster.points]
+      .map(point => ({ point, progress: routeProgressMeters(route, point) }))
+      .sort((a, b) => a.progress - b.progress);
+
+    const chosen = [];
+    for (const entry of ordered) {
+      const tooClose = chosen.some(existing => routeDistanceMeters(existing, entry.point) < 500);
+      if (!tooClose) chosen.push(entry.point);
+      if (chosen.length >= 3) break;
+    }
+    representative.push(...chosen);
+    if (representative.length >= maxExclusions) break;
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  for (const point of representative) {
+    const key = `${Math.round(point[0] * 10000) / 10000},${Math.round(point[1] * 10000) / 10000}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(point);
+    if (deduped.length >= maxExclusions) break;
+  }
+  return deduped;
+}
+
+function pointExclusionViolation(candidateRoute, exclusionPoints) {
+  if (!candidateRoute || !exclusionPoints.length) return null;
+  const stillMatchesExcludedPoint = exclusionPoints.some(point => pointToRouteDistanceMeters(point, candidateRoute.geometry.coordinates) <= ROUTE_MATCH_METERS * 2);
+  return stillMatchesExcludedPoint ? 'pointExclusionViolation' : null;
+}
+
 function routePointAtProgress(route, targetProgress) {
   const coords = route.geometry.coordinates;
   if (!coords.length) return null;
@@ -510,6 +551,42 @@ async function getRouteViaWaypoints(origin, destination, waypoints) {
   const coords = [origin.coordinates, ...waypoints, destination.coordinates];
   const routes = await directionsFor(coords, false);
   return routes[0];
+}
+
+async function buildPointExclusionCandidate(fastestRoute, cameraPoints, allPoints) {
+  if (!lastOrigin || !lastDestination || !cameraPoints.length) return null;
+
+  const representativeExclusions = representativeExclusionPoints(fastestRoute, cameraPoints, 50);
+  if (!representativeExclusions.length) return null;
+
+  const candidateRoute = (await directionsFor([
+    lastOrigin.coordinates,
+    lastDestination.coordinates
+  ], false, representativeExclusions))[0];
+  const candidateExposure = exposureCount(candidateRoute, allPoints);
+  const violation = pointExclusionViolation(candidateRoute, representativeExclusions);
+  const accepted = candidateExposure < exposureCount(fastestRoute, allPoints) && candidateRoute.duration <= fastestRoute.duration * PRIVACY_ROUTE_MAX_FACTOR;
+
+  return {
+    route: candidateRoute,
+    count: candidateExposure,
+    candidateType: 'point-exclusion',
+    exclusionCount: representativeExclusions.length,
+    accepted,
+    pointExclusionViolation: violation,
+    duration: candidateRoute.duration,
+    distance: candidateRoute.distance,
+    generated: true,
+    diagnostics: {
+      exclusionCount: representativeExclusions.length,
+      finalExposure: candidateExposure,
+      finalDuration: candidateRoute.duration,
+      finalDistance: candidateRoute.distance,
+      accepted,
+      pointExclusionViolation: violation,
+      maxDurationRuleRespected: candidateRoute.duration <= fastestRoute.duration * PRIVACY_ROUTE_MAX_FACTOR
+    }
+  };
 }
 
 async function buildClusterGreedyDetoursV2(fastestRoute, cameraPoints, allPoints, maxClusters = 3, maxGeneratedRequests = 18) {
@@ -687,7 +764,10 @@ async function scoreVisibleRoutes(routes) {
     const generatedCandidates = fastestCameraPoints.length
       ? await buildClusterGreedyDetoursV2(fastestRoute, fastestCameraPoints, points)
       : [];
-    const allCandidates = [...conventionalCandidates, ...generatedCandidates];
+    const pointExclusionCandidate = fastestCameraPoints.length
+      ? await buildPointExclusionCandidate(fastestRoute, fastestCameraPoints, points)
+      : null;
+    const allCandidates = [...conventionalCandidates, ...generatedCandidates, ...(pointExclusionCandidate ? [pointExclusionCandidate] : [])];
     const best = chooseBestExposureCandidate(allCandidates, fastestRoute);
 
     routes.forEach(route => { delete route._dflcktKind; delete route._dflcktExposureCount; });
