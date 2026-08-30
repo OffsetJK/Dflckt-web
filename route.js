@@ -444,9 +444,66 @@ function clusterDetourWaypoints(route, clusterPoints) {
   const center = cameraCentroid(clusterPoints);
   const segment = closestRouteSegment(route, center);
   return DETOUR_OFFSETS_METERS.flatMap(distance => [
-    { distance, side: 1, waypoint: offsetPerpendicular(center, segment.a, segment.b, distance, 1) },
-    { distance, side: -1, waypoint: offsetPerpendicular(center, segment.a, segment.b, distance, -1) }
+    { distance, side: 1, type: 'local', waypoint: offsetPerpendicular(center, segment.a, segment.b, distance, 1) },
+    { distance, side: -1, type: 'local', waypoint: offsetPerpendicular(center, segment.a, segment.b, distance, -1) }
   ]);
+}
+
+function routePointAtProgress(route, targetProgress) {
+  const coords = route.geometry.coordinates;
+  if (!coords.length) return null;
+  let accumulated = 0;
+  for (let i = 1; i < coords.length; i += 1) {
+    const a = coords[i - 1];
+    const b = coords[i];
+    const segmentLength = routeDistanceMeters(a, b);
+    const nextAccumulated = accumulated + segmentLength;
+    if (targetProgress <= nextAccumulated || i === coords.length - 1) {
+      if (segmentLength <= 0) return a;
+      const t = segmentLength === 0 ? 0 : (targetProgress - accumulated) / segmentLength;
+      return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    }
+    accumulated = nextAccumulated;
+  }
+  return coords[coords.length - 1];
+}
+
+function routeSegmentAtProgress(route, targetProgress) {
+  const coords = route.geometry.coordinates;
+  let accumulated = 0;
+  for (let i = 1; i < coords.length; i += 1) {
+    const a = coords[i - 1];
+    const b = coords[i];
+    const segmentLength = routeDistanceMeters(a, b);
+    const nextAccumulated = accumulated + segmentLength;
+    if (targetProgress <= nextAccumulated || i === coords.length - 1) {
+      return { a, b };
+    }
+    accumulated = nextAccumulated;
+  }
+  const last = coords.length - 1;
+  return { a: coords[last - 1], b: coords[last] };
+}
+
+function clusterCorridorBypassWaypoints(route, cluster, lateralMeters = 3500, leadLagMeters = 3000) {
+  const beforeProgress = Math.max(0, cluster.startMeters - leadLagMeters);
+  const afterProgress = Math.max(beforeProgress + 1000, cluster.endMeters + leadLagMeters);
+  const beforePoint = routePointAtProgress(route, beforeProgress);
+  const afterPoint = routePointAtProgress(route, afterProgress);
+  if (!beforePoint || !afterPoint) return [];
+
+  const beforeSegment = routeSegmentAtProgress(route, beforeProgress);
+  const afterSegment = routeSegmentAtProgress(route, afterProgress);
+
+  return [-1, 1].map(side => ({
+    type: 'corridor-bypass',
+    side,
+    offset: lateralMeters,
+    waypoints: [
+      offsetPerpendicular(beforePoint, beforeSegment.a, beforeSegment.b, lateralMeters, side),
+      offsetPerpendicular(afterPoint, afterSegment.a, afterSegment.b, lateralMeters, side)
+    ]
+  }));
 }
 
 async function getRouteViaWaypoints(origin, destination, waypoints) {
@@ -466,7 +523,9 @@ async function buildClusterGreedyDetoursV2(fastestRoute, cameraPoints, allPoints
       acceptedWaypointCount: 0,
       finalExposure: exposureCount(fastestRoute, allPoints),
       finalDuration: fastestRoute ? fastestRoute.duration : null,
-      maxDurationRuleRespected: true
+      maxDurationRuleRespected: true,
+      acceptedCandidateTypes: [],
+      lastAcceptedCandidateType: null
     };
     return empty;
   }
@@ -476,6 +535,7 @@ async function buildClusterGreedyDetoursV2(fastestRoute, cameraPoints, allPoints
   let currentRoute = fastestRoute;
   let currentExposure = exposureCount(currentRoute, allPoints);
   const acceptedWaypoints = [];
+  const acceptedCandidateTypes = [];
   let generatedRequests = 0;
   let processedClusters = 0;
   let skippedClusters = 0;
@@ -494,6 +554,7 @@ async function buildClusterGreedyDetoursV2(fastestRoute, cameraPoints, allPoints
         exposureAfter: currentExposure,
         chosenSide: null,
         chosenOffset: null,
+        candidateType: null,
         resultingDuration: currentRoute.duration,
         cumulativeWaypointCount: acceptedWaypoints.length,
         note: 'cluster no longer encountered on current route'
@@ -506,12 +567,15 @@ async function buildClusterGreedyDetoursV2(fastestRoute, cameraPoints, allPoints
     processedClusters += 1;
 
     let bestCandidate = null;
-    const candidateOptions = clusterDetourWaypoints(currentRoute, cluster.points);
+    const baseLocalOptions = clusterDetourWaypoints(currentRoute, cluster.points);
+    const corridorBypassOptions = clusterCorridorBypassWaypoints(currentRoute, cluster, 3500, 3000);
+    const candidateOptions = [...baseLocalOptions, ...corridorBypassOptions];
 
     for (const option of candidateOptions) {
       if (generatedRequests >= maxGeneratedRequests) break;
 
-      const candidateRoute = await getRouteViaWaypoints(lastOrigin, lastDestination, [...acceptedWaypoints, option.waypoint]);
+      const routeWaypoints = Array.isArray(option.waypoints) ? option.waypoints : [option.waypoint];
+      const candidateRoute = await getRouteViaWaypoints(lastOrigin, lastDestination, [...acceptedWaypoints, ...routeWaypoints]);
       generatedRequests += 1;
 
       if (candidateRoute.duration > fastestRoute.duration * PRIVACY_ROUTE_MAX_FACTOR) continue;
@@ -524,8 +588,9 @@ async function buildClusterGreedyDetoursV2(fastestRoute, cameraPoints, allPoints
           route: candidateRoute,
           count: candidateExposure,
           side: option.side,
-          offset: option.distance,
-          waypoint: option.waypoint
+          offset: option.offset ?? option.distance,
+          type: option.type,
+          waypoints: routeWaypoints
         };
       }
     }
@@ -538,6 +603,7 @@ async function buildClusterGreedyDetoursV2(fastestRoute, cameraPoints, allPoints
         exposureAfter: currentExposure,
         chosenSide: null,
         chosenOffset: null,
+        candidateType: null,
         resultingDuration: currentRoute.duration,
         cumulativeWaypointCount: acceptedWaypoints.length,
         note: 'no candidate reduced exposure'
@@ -550,7 +616,8 @@ async function buildClusterGreedyDetoursV2(fastestRoute, cameraPoints, allPoints
     const beforeExposure = currentExposure;
     currentRoute = bestCandidate.route;
     currentExposure = bestCandidate.count;
-    acceptedWaypoints.push(bestCandidate.waypoint);
+    acceptedWaypoints.push(...bestCandidate.waypoints);
+    acceptedCandidateTypes.push(bestCandidate.type);
 
     const accepted = {
       clusterNumber,
@@ -559,6 +626,7 @@ async function buildClusterGreedyDetoursV2(fastestRoute, cameraPoints, allPoints
       exposureAfter: currentExposure,
       chosenSide: bestCandidate.side,
       chosenOffset: bestCandidate.offset,
+      candidateType: bestCandidate.type,
       resultingDuration: currentRoute.duration,
       cumulativeWaypointCount: acceptedWaypoints.length
     };
@@ -577,7 +645,9 @@ async function buildClusterGreedyDetoursV2(fastestRoute, cameraPoints, allPoints
     acceptedWaypointCount: acceptedWaypoints.length,
     finalExposure: currentExposure,
     finalDuration: currentRoute.duration,
-    maxDurationRuleRespected: currentRoute.duration <= fastestRoute.duration * PRIVACY_ROUTE_MAX_FACTOR
+    maxDurationRuleRespected: currentRoute.duration <= fastestRoute.duration * PRIVACY_ROUTE_MAX_FACTOR,
+    acceptedCandidateTypes,
+    lastAcceptedCandidateType: acceptedCandidateTypes[acceptedCandidateTypes.length - 1] || null
   };
 
   return result;
