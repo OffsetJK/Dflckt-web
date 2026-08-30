@@ -122,6 +122,40 @@ function distanceMeters(a, b) {
   return 6371000 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
 }
 
+function pointAtRouteFraction(route, fraction) {
+  const coordinates = route.geometry.coordinates;
+  const segmentLengths = coordinates.slice(1).map((coordinate, index) => distanceMeters(coordinates[index], coordinate));
+  const totalLength = segmentLengths.reduce((sum, length) => sum + length, 0);
+  let remaining = totalLength * fraction;
+  for (let index = 0; index < segmentLengths.length; index += 1) {
+    const segmentLength = segmentLengths[index];
+    if (remaining <= segmentLength) {
+      const start = coordinates[index];
+      const end = coordinates[index + 1];
+      const ratio = segmentLength ? remaining / segmentLength : 0;
+      return [start[0] + (end[0] - start[0]) * ratio, start[1] + (end[1] - start[1]) * ratio];
+    }
+    remaining -= segmentLength;
+  }
+  return coordinates[coordinates.length - 1];
+}
+
+function buildSyntheticAlprFixture(routes) {
+  const fastestRoute = [...routes].sort((a, b) => a.duration - b.duration)[0];
+  const fractions = [0.2, 0.22, 0.55, 0.57, 0.82, 0.84];
+  const points = fractions.map(fraction => pointAtRouteFraction(fastestRoute, fraction))
+    .sort((a, b) => a[1] - b[1]);
+  const buffer = Buffer.alloc(16 + 9 * points.length);
+  buffer.write('FHIX', 0, 'ascii');
+  buffer.writeUInt32LE(1, 4);
+  buffer.writeUInt32LE(points.length, 8);
+  points.forEach((point, index) => {
+    buffer.writeInt32LE(Math.round(point[1] * 1e6), 16 + index * 4);
+    buffer.writeInt32LE(Math.round(point[0] * 1e6), 16 + points.length * 4 + index * 4);
+  });
+  return buffer;
+}
+
 function operationalReasonableness(route, fastestRoute) {
   if (!route || !fastestRoute || !route.geometry?.coordinates?.length) {
     return { reasonable: false, summary: 'route geometry unavailable' };
@@ -181,7 +215,7 @@ function summarizeV2Diagnostics(events, fastestExposure, fastestDuration) {
   };
 }
 
-async function runBrowserCase(browser, testCase, experimental) {
+async function runBrowserCase(browser, testCase, experimental, fixtureState) {
   const context = await browser.newContext({ serviceWorkers: 'block' });
   await context.setDefaultTimeout(MAX_WAIT_MS);
   const page = await context.newPage();
@@ -191,6 +225,8 @@ async function runBrowserCase(browser, testCase, experimental) {
   const routeResponses = [];
   const routeResponseTasks = [];
   const responseMetadata = [];
+  let resolveInitialRoutes;
+  const initialRoutesPromise = new Promise(resolve => { resolveInitialRoutes = resolve; });
   const alprDiagnostics = {
     datasetRequestObserved: false,
     httpStatus: null,
@@ -260,6 +296,9 @@ async function runBrowserCase(browser, testCase, experimental) {
           roundedDurationMinutes: roundMinutes(route.duration)
         }))
         : [];
+      if (metadata.alternatives === true && Array.isArray(body?.routes) && body.routes.length) {
+        resolveInitialRoutes(body.routes);
+      }
       if (body?.routes?.length) {
         routeResponses.push(...body.routes.map(route => ({
           route,
@@ -275,6 +314,12 @@ async function runBrowserCase(browser, testCase, experimental) {
     const source = readExperimentalRouteSource();
     await page.route('**/*', async route => {
       const url = new URL(route.request().url());
+      if (url.origin === ALPR_INDEX_ORIGIN && url.pathname === ALPR_INDEX_PATH) {
+        alprDiagnostics.datasetRequestObserved = true;
+        if (!fixtureState.buffer) fixtureState.buffer = buildSyntheticAlprFixture(await initialRoutesPromise);
+        await route.fulfill({ status: 200, contentType: 'application/octet-stream', body: fixtureState.buffer });
+        return;
+      }
       if (url.origin === PRODUCTION_ORIGIN && url.pathname === '/route.js') {
         routeIntercepted = true;
         await route.fulfill({
@@ -283,6 +328,17 @@ async function runBrowserCase(browser, testCase, experimental) {
           headers: { 'cache-control': 'no-store' },
           body: source
         });
+        return;
+      }
+      await route.continue();
+    });
+  } else {
+    await page.route('**/*', async route => {
+      const url = new URL(route.request().url());
+      if (url.origin === ALPR_INDEX_ORIGIN && url.pathname === ALPR_INDEX_PATH) {
+        alprDiagnostics.datasetRequestObserved = true;
+        if (!fixtureState.buffer) fixtureState.buffer = buildSyntheticAlprFixture(await initialRoutesPromise);
+        await route.fulfill({ status: 200, contentType: 'application/octet-stream', body: fixtureState.buffer });
         return;
       }
       await route.continue();
@@ -383,8 +439,9 @@ async function runBrowserCase(browser, testCase, experimental) {
   try {
     const results = [];
     for (const testCase of routeCases) {
-      results.push(await runBrowserCase(browser, testCase, false));
-      results.push(await runBrowserCase(browser, testCase, true));
+      const fixtureState = { buffer: null };
+      results.push(await runBrowserCase(browser, testCase, false, fixtureState));
+      results.push(await runBrowserCase(browser, testCase, true, fixtureState));
     }
     process.stdout.write(`${JSON.stringify({ results }, null, 2)}\n`);
   } finally {
