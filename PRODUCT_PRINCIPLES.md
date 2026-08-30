@@ -50,6 +50,25 @@ Privacy is not a secondary legal page or generic brand virtue. It belongs in the
 
 DFLCKT should not rely on generic “private navigation” as its differentiator. The stronger distinction is that **surveillance exposure itself becomes a routing variable**, while the service is deliberately designed not to turn the resulting route decision into another movement-history dataset.
 
+DFLCKT should also remain vendor-neutral as a brand. Flock/ALPR awareness may be the current entry point because of public interest, but the long-term product category is broader surveillance-aware navigation rather than an app defined around one surveillance vendor.
+
+## Working freemium strategy hypothesis
+
+**Flock/ALPR avoidance acquires the user. Comprehensive surveillance-aware navigation monetizes the user.**
+
+Treat this as a business hypothesis to validate, not a permanent pricing commitment.
+
+The working model is:
+
+- **Free:** useful Flock/ALPR route awareness and basic avoidance. The free product should be genuinely useful and competitive with free ALPR-awareness tools rather than an intentionally crippled demo.
+- **Paid / Pro:** broader surveillance and automated-enforcement intelligence, potentially including red-light cameras, speed cameras, traffic-monitoring cameras, other ALPR vendors, and additional reliably sourced fixed surveillance infrastructure.
+- **Paid routing value:** where technically and commercially justified, Pro should allow users to understand and optimize routes across selected exposure categories rather than merely unlock additional dots on a map.
+- **Conversion concept:** a free user may be told that additional surveillance/enforcement exposure exists along a route without exposing precise infrastructure locations; detailed classification and broader exposure intelligence can be part of Pro.
+
+Do not assume consumers will pay simply for Flock avoidance when credible competitors provide that capability for free. Meaningful pricing should depend on demonstrating broader product value and validating willingness to pay.
+
+Avoid major infrastructure capital commitments solely in anticipation of future demand. Prove technical differentiation and commercial demand before committing substantial capital to dedicated server hardware; rent or use usage-based infrastructure while validating the market when practical.
+
 ## Product-map safety
 
 User-facing maps should not expose precise surveillance-infrastructure coordinates. Known infrastructure should be represented approximately rather than as exact targetable points. Confidence should be communicated visually without implying a false physical coverage area.
